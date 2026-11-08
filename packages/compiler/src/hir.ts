@@ -75,8 +75,8 @@ export type HirStmt =
   | { k: "setSelfCond"; name: string; type: BpType; cond: HirExpr; a: HirExpr; b: HirExpr; span: Span }
   /** `for (let i = A; cond; i++ | i--)` with an int counter; the counter is only visible in `cond` and `body`. */
   | { k: "forCount"; counter: LocalId; name: string; init: HirExpr; cond: HirExpr; step: 1 | -1; body: HirStmt[]; span: Span }
-  /** Mutation of an own array variable: `push(x)`, `splice(i, 1)` (removeAt), `length = 0` (clear). `array.type` is the array type, e.g. "array:name". */
-  | { k: "arrayOp"; op: "push" | "removeAt" | "clear"; array: { self: string; type: BpType }; value?: HirExpr; index?: HirExpr; span: Span }
+  /** Mutation of an own array variable: `push(x)`, `splice(i, 1)` (removeAt), `length = 0` (clear), `[i] = x` (set). `array.type` is the array type, e.g. "array:name". */
+  | { k: "arrayOp"; op: "push" | "removeAt" | "clear" | "set"; array: { self: string; type: BpType }; value?: HirExpr; index?: HirExpr; span: Span }
   /** Mutation of an own map/set variable: Map `set`/`delete`/`clear`, Set `add`/`delete`/`clear`. `target.type` is e.g. "map:name:int" or "set:name". */
   | { k: "containerOp"; container: "map" | "set"; op: "add" | "remove" | "clear"; target: { self: string; type: BpType }; key?: HirExpr; value?: HirExpr; span: Span }
   /** `break`/`continue` of the innermost enclosing loop (a `return;` directly in a forEach callback is a `continue`). */

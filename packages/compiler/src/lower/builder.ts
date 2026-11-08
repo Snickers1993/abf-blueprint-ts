@@ -788,21 +788,31 @@ export class UnitBuilder {
         });
         return;
       case "arrayOp": {
-        const fn = s.op === "push" ? "Array_Add" : s.op === "removeAt" ? "Array_Remove" : "Array_Clear";
+        const fn = { push: "Array_Add", removeAt: "Array_Remove", clear: "Array_Clear", set: "Array_Set" }[s.op];
         const elem = s.array.type.slice("array:".length);
         const arr = this.getVar(s.array.self, s.span);
-        const arg = s.op === "push" ? s.value : s.op === "removeAt" ? s.index : undefined;
-        const argPin = s.op === "push" ? "NewItem" : "IndexToRemove";
-        const o = arg ? this.optOperand(arg, s.op === "push" ? elem : "int") : undefined;
         const pinTypes: Record<string, string> = { [P.arrayLengthArray]: s.array.type };
-        if (s.op === "push") pinTypes[argPin] = elem;
+        // [operand, pin, pin type]: push feeds NewItem, removeAt IndexToRemove, set Index and Item
+        const args: Array<[HirExpr, string, string]> = [];
+        if (s.op === "push" && s.value) args.push([s.value, "NewItem", elem]);
+        if (s.op === "removeAt" && s.index) args.push([s.index, "IndexToRemove", "int"]);
+        if (s.op === "set" && s.index && s.value) args.push([s.index, "Index", "int"], [s.value, "Item", elem]);
+        const ops: Array<{ o: Operand; pin: string }> = [];
+        for (const [x, pin, ty] of args) {
+          const o = this.optOperand(x, ty);
+          if (o) ops.push({ o, pin });
+        }
+        if (s.op === "push") pinTypes.NewItem = elem;
+        if (s.op === "set") pinTypes.Item = elem;
         const id = this.emit("arr", this.profile.nodeClasses.callArrayFunction, [this.arrayFn(fn)], undefined, s.span, { pinTypes });
         this.execInto(id);
         this.link(arr, `${id}.${P.arrayLengthArray}`);
         const defaults: Record<string, string> = {};
-        if (o) this.feed(o, id, argPin, defaults);
+        for (const { o, pin } of ops) this.feed(o, id, pin, defaults);
+        if (s.op === "set") defaults.bSizeToFit = "false";
         this.settle(id, defaults);
-        if (o && o.nulls.length > 0) this.cur = [...this.cur, ...o.nulls];
+        const nulls = ops.flatMap(({ o }) => o.nulls);
+        if (nulls.length > 0) this.cur = [...this.cur, ...nulls];
         return;
       }
       case "containerOp": {

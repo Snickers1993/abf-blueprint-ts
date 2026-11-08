@@ -435,7 +435,7 @@ Meaning: an array is changed somewhere other than as a statement on an own array
 
 Typical cause: `push` or `splice` on a local array or a parameter, or used as an expression.
 
-Fix: keep the array as a field of the class and write `this.<Array>.push(x)`, `this.<Array>.splice(i, 1)` or `this.<Array>.length = 0` as statements.
+Fix: keep the array as a field of the class and write `this.<Array>.push(x)`, `this.<Array>.splice(i, 1)`, `this.<Array>[i] = x` or `this.<Array>.length = 0` as statements.
 
 ### ABFC2042
 

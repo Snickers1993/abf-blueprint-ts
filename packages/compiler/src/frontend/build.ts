@@ -1152,8 +1152,17 @@ class HirBuilder {
       if (!ts.isNumericLiteral(r) || r.text !== "0") return f.fail("ABFC2099", "only `<array>.length = 0` is supported (it clears the array)", e.right);
       return { k: "arrayOp", op: "clear", array: self, span: this.sp(e) };
     }
+    if (ts.isElementAccessExpression(left) && this.isArrayNode(left.expression)) {
+      // this.Arr[i] = x: Set Array Elem (Array_Set, bSizeToFit false), on an own array only, like push and splice
+      const self = this.selfArray(left.expression);
+      if (!self) return f.fail("ABFC2041", ARRAY_OWN_ONLY, left.expression);
+      const index = this.expr(left.argumentExpression, "int");
+      if (kindOfBpType(index.type) !== "int") return f.fail("ABFC2012", `an array index must be an int, not ${index.type}`, left.argumentExpression);
+      const elem = self.type.slice("array:".length);
+      return { k: "arrayOp", op: "set", array: self, index, value: this.expr(e.right, elem), span: this.sp(e) };
+    }
     if (!ts.isPropertyAccessExpression(left) || left.expression.kind !== ts.SyntaxKind.ThisKeyword) {
-      return f.fail("ABFC2099", "assignment is only supported as this.<variable> = value", e);
+      return f.fail("ABFC2099", "assignment is only supported as this.<variable> = value or this.<array>[i] = value", e);
     }
     const sym = this.checker.getSymbolAtLocation(left.name);
     if (!sym) return f.fail("ABFC2060", `member ${left.name.text} has no Blueprint metadata (@bpPath)`, left.name);
