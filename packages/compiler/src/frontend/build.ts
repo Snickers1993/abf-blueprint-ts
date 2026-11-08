@@ -1909,6 +1909,8 @@ class HirBuilder {
     }
     if (!ts.isPropertyAccessExpression(callee)) return f.fail("ABFC2099", "only method and library calls are supported", node);
 
+    if (callee.expression.kind === ts.SyntaxKind.SuperKeyword) return this.superCall(node, callee, sp);
+
     const ck = this.containerKind(callee.expression);
     if (ck !== undefined) return this.containerCall(node, callee, ck, sp);
 
@@ -1999,6 +2001,26 @@ class HirBuilder {
     };
     this.callInfo.set(out, fi);
     return out;
+  }
+
+  /** `super.X(args)` inside `@override X`: the parent's implementation (Blueprint "Add Call to Parent Function"). */
+  private superCall(node: ts.CallExpression, callee: ts.PropertyAccessExpression, sp: Span): HirExpr {
+    const f: DiagSink = this.sink;
+    const name = callee.name.text;
+    if (this.unitKind !== "override" || name !== this.unitName) {
+      return f.fail("ABFC2099", `super.${name}() can only be called inside @override ${name} (it calls the parent's ${name})`, node);
+    }
+    const sym = this.checker.getSymbolAtLocation(callee.name);
+    const fi = sym ? functionInfo(sym) : undefined;
+    if (!fi) return f.fail("ABFC2060", `function ${name} has no Blueprint metadata (@bpPath)`, callee.name);
+    if (fi.outs.length > 0 || fi.execOutputs !== null) return f.fail("ABFC2099", `super.${name}() is supported only for parent events without outputs`, node);
+    const args: Array<{ pin: string; value: HirExpr }> = [];
+    node.arguments.forEach((a, i) => {
+      const p = fi.params[i];
+      if (!p) f.fail("ABFC2099", `too many arguments for ${name}`, a);
+      args.push({ pin: p.pin, value: this.expr(a, p.type) });
+    });
+    return { k: "call", owner: this.cls.parent, name, target: null, static: false, pure: false, execOutputs: null, args, outs: [], type: "void", parentCall: true, span: sp };
   }
 
   private createWidgetExpr(node: ts.CallExpression, sp: Span): HirExpr {

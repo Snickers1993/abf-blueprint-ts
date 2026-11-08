@@ -113,6 +113,8 @@ export type HirExpr = (
       execOutputs: string[] | null;
       args: Array<{ pin: string; value: HirExpr }>;
       outs: Array<{ pin: string; type: BpType }>;
+      /** `super.X(...)` in the override X: a Call Parent Function node (owner = the parent class). */
+      parentCall?: true;
     }
   | { k: "cast"; value: HirExpr; target: string; castPin: string }
   | { k: "optional"; value: HirExpr; then: HirExpr } // a?.b : `then` refers to value via { k: "hole" }

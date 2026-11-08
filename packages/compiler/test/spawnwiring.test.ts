@@ -18,7 +18,7 @@ const profile = JSON.parse(readFileSync(profilePath, "utf8")) as Profile;
 const config = { mod: "TestMod" };
 
 function source(body: string, members = ""): string {
-  return `import { bindEvent, blueprint, event, nameOf, spawnActor } from "@abfc/runtime";
+  return `import { bindEvent, blueprint, event, nameOf, override, spawnActor } from "@abfc/runtime";
 import { BP_FakePot_C } from "/Game/Fake/BP_FakePot";
 import { Actor } from "/Script/FakeEngine";
 import type { BP_Counter_Manual } from "/TestMod/Relay/BP_Counter";
@@ -115,6 +115,21 @@ test("bindEvent(..., this, \"Event\") feeds Add Delegate from the own event's de
 test("bindEvent(..., this, name) needs an own @event", () => {
   const hir = hirOf("    const a = spawnActor(BP_FakePot_C, {});\n    bindEvent(a, \"ButtonPressed\", this, \"Nope\");", true);
   assert.ok(hir.diagnostics.some((d) => d.code === "ABFC2054"));
+});
+
+test("super.X() in @override X is a Call Parent Function node on the parent class, first on the exec line", () => {
+  const ir = irOf("", "  @override\n  override ReceiveBeginPlay(): void {\n    super.ReceiveBeginPlay();\n    this.Go();\n  }\n");
+  const u = ir.assets[0]!.units.find((x) => x.id === "override:ReceiveBeginPlay")!;
+  const parent = u.nodes.find((n) => n.t3d.class.endsWith("K2Node_CallParentFunction"))!;
+  assert.ok(parent, "a Call Parent Function node");
+  assert.equal(parent.sem, undefined);
+  assert.deepEqual(parent.t3d.props, ["FunctionReference=(MemberParent=\"/Script/CoreUObject.Class'/Script/FakeEngine.Actor'\",MemberName=\"ReceiveBeginPlay\")"]);
+  assert.ok((u.wires as Array<[string, string]>).some(([a, b]) => a === "ev0.then" && b === `${parent.id}.execute`));
+});
+
+test("super.X() outside @override X is refused", () => {
+  const hir = hirOf("    super.ReceiveBeginPlay();", true);
+  assert.ok(hir.diagnostics.some((d) => d.code === "ABFC2099" && /super\.ReceiveBeginPlay/.test(d.message)));
 });
 
 test("bindEvent needs string literal names", () => {
