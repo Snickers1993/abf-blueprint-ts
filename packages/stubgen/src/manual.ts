@@ -26,6 +26,11 @@ export interface ManualAsset {
   variables: Array<ManualPin & { replicated?: true }>;
   /** Designer widgets of a Widget Blueprint with `bIsVariable=True`: name and widget class path. Emitted as `readonly` members. */
   widgets: Array<{ name: string; cls: string }>;
+  /**
+   * Components the asset adds itself (its construction script; `structure.components` rows that are not inherited or
+   * native): name and component class path. Emitted as `readonly` members; components of the parent come from its stub.
+   */
+  components?: Array<{ name: string; cls: string }>;
   functions: Array<{ name: string; inputs: ManualPin[]; outputs: ManualPin[] }>;
   /** `net` is set for replicated custom events (FUNC_Net 0x40 in the head line `FunctionFlags=`). */
   events: Array<{ name: string; params: ManualPin[]; net?: { kind: "server" | "client" | "multicast"; reliable: boolean } }>;
@@ -103,6 +108,15 @@ export function manualFromExport(
       events.push(ev);
     }
   }
+  const components: Array<{ name: string; cls: string }> = [];
+  if (Array.isArray(st.components)) {
+    for (const c of st.components) {
+      if (!isObj(c) || typeof c.name !== "string" || typeof c.class !== "string") continue;
+      if (c.name === "None" || c.inherited === true || c.native === true) continue;
+      if (ex.variables.some((v) => v.name === c.name) || components.some((o) => o.name === c.name)) continue;
+      components.push({ name: c.name, cls: c.class });
+    }
+  }
   const functions: ManualAsset["functions"] = [];
   if (Array.isArray(st.functions)) {
     for (const f of st.functions) {
@@ -120,6 +134,7 @@ export function manualFromExport(
       return out;
     }),
     widgets: ex.widgets.filter((w) => w.isVariable && !ex.variables.some((v) => v.name === w.name)).map((w) => ({ name: w.name, cls: w.cls })),
+    ...(components.length > 0 ? { components } : {}),
     functions,
     events,
     owned,
@@ -132,6 +147,7 @@ export function manualReferences(m: ManualAsset): TypeRef[] {
   const add = (t: string): void => void refs.push(...refsOfGrammar(normalizeGrammar(t)));
   for (const v of m.variables) add(v.type);
   for (const w of m.widgets) refs.push({ path: w.cls, kind: "class" });
+  for (const c of m.components ?? []) refs.push({ path: c.cls, kind: "class" });
   for (const f of m.functions) for (const p of [...f.inputs, ...f.outputs]) add(p.type);
   for (const e of m.events) for (const p of e.params) add(p.type);
   return refs;
@@ -141,6 +157,12 @@ export function manualReferences(m: ManualAsset): TypeRef[] {
 export function widgetMember(classPath: string, name: string, typeCls: string, fb: FileBuilder, declaredCls: string = typeCls): string {
   const tags = [`@bpPath ${classPath}:${name}`, `@bpType object:${declaredCls}`, "@bpWidget", "@bpHandMade"];
   return jsdoc(tags, "  ") + `  readonly ${memberKey(name)}: ${fb.ref(typeCls, "class")};\n`;
+}
+
+/** A component the asset adds itself, as a non-null `readonly` member: `@bpComponent` marks it, abfc never owns it. */
+export function componentMember(classPath: string, name: string, cls: string, fb: FileBuilder): string {
+  const tags = [`@bpPath ${classPath}:${name}`, `@bpType object:${cls}`, "@bpComponent", "@bpHandMade"];
+  return jsdoc(tags, "  ") + `  readonly ${memberKey(name)}: ${fb.ref(cls, "class")};\n`;
 }
 
 /** The stub file of one hand-made asset: `{ file: "Mod/<mod>/<a/X>.d.ts", text }`. */
@@ -170,6 +192,7 @@ export function emitManual(m: ManualAsset, header?: string): { file: string; tex
     body.push(jsdoc(tags, "  ") + `  ${memberKey(v.name)}: ${tsOfGrammar(g, fb)};\n`);
   }
   for (const w of m.widgets) body.push(widgetMember(m.classPath, w.name, w.cls, fb));
+  for (const c of m.components ?? []) body.push(componentMember(m.classPath, c.name, c.cls, fb));
   for (const f of m.functions) {
     if (ownedUnits.has(`function:${f.name}`)) continue;
     const sig = buildSignature(

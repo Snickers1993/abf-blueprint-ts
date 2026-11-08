@@ -1974,7 +1974,8 @@ class HirBuilder {
       args.push({ pin: p.pin, value: p.type === "unsupported:delegate" ? this.delegateArg(a) : this.expr(a, p.type) });
     });
 
-    const multi = fi.execOutputs !== null || fi.outs.length > 1 || (fi.outs.length === 1 && fi.outs[0]?.pin !== "ReturnValue");
+    // One output is the call's value whatever its pin is named (the stub returns its type: `GetOverlappingActors(...): Actor[]`).
+    const multi = fi.execOutputs !== null || fi.outs.length > 1;
     const type = multi ? "result" : (fi.outs[0]?.type ?? "void");
     const out: HirExpr = {
       k: "call",

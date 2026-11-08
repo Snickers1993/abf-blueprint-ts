@@ -17,6 +17,7 @@ abfc uses semantic versioning for its command-line surface: the commands, their 
 - `other.Var = value` sets a variable of another object (a Set node with its Target wired), e.g. a station's `StationId` right after spawning it.
 - `bindEvent(source, "Dispatcher", target, "Function")` binds another object's function or event to an object's event dispatcher (Add Delegate fed by Create Event), as a hand-made "Bind Event to ..." does.
 - A `Vector`, `Vector2D` or `Rotator` literal whose fields are all numbers, fed straight into a pin, is the pin's default text (no make node): a spawn at a literal place is two nodes.
+- Stubs of hand-made actors list the components they add themselves (`readonly Car: SceneComponent`, tagged `@bpComponent`), from the `components` of `bp_read`; inherited and native components still come from the parent's stub. Run `abfc generate --refresh` once to pick them up.
 - `/` on real values lowers to `Divide_DoubleDouble` (it was ABFC2099). `/` on integers stays ABFC2010 (use `idiv`).
 - `abfc generate` with `stubs.modAssets: "all"` skips mod packages whose name table has no `BlueprintGeneratedClass` (meshes, textures, materials, sounds) before reading them through the backend. Each read is a headless export of 15-18 s, so a mod of 877 assets went from about 4 hours to the Blueprints only.
 - Struct literals of `Vector`, `Vector2D` and `Rotator` lower to `MakeVector`, `MakeVector2D` and `MakeRotator` (KismetMathLibrary). A Make Struct node on these core structs fails the Unreal compile ("is not a BlueprintType"), found on the first real build of an RTS Blueprint.
@@ -43,6 +44,8 @@ abfc uses semantic versioning for its command-line surface: the commands, their 
 - `abfc stubs` and `abfc init --no-stubs` still work exactly as before but print a deprecation warning on standard error; they are no longer listed in the usage text and will be removed in a future major version.
 
 ### Fixed
+
+- A call whose only output is an out parameter (`PrimitiveComponent.GetOverlappingActors(...)`, typed `Actor[]` by its stub) is a value read from that pin; it was a multi-output result, so `.length` or a const of it failed with ABFC2060.
 
 - Engine types used only through other types (designer widgets, return values) were left as placeholders without members. `abfc generate` and the start of `abfc build`, `test` and `publish` now generate the placeholder classes and structs the source uses, record them in `auto.added`, and no `stubs.scriptClasses` entry is needed; the editor offers the quick fix "Generate stubs for ..." on TS2339 and TS2551 for a placeholder receiver.
 - Stubs now list the designer widgets (`readonly`, `@bpWidget`), SCS components (`readonly`, `@bpComponent`) and widget- or component-typed variables of game Blueprints, and the component and widget properties of native classes (a character's mesh or movement component), on the declaring class only. Needs a backend with the member pass (otherwise warning ABFC3014). `_index.json` lists them under `discovered`. Run `abfc generate` once (generator 0.7.0).
