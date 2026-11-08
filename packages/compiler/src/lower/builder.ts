@@ -158,6 +158,8 @@ export class UnitBuilder {
   private params = new Map<string, string>();
   private entryId = "";
   private tempCount = 0;
+  /** Consts bound to a live pure value that reads state (not stored in a temp): a const built from them reads state too. */
+  private unstable = new Set<LocalId>();
   private loopCount = 0;
   /** Functions: the only value `return` is the last top-level statement, so its value can feed the result node directly. */
   private directReturn = false;
@@ -736,7 +738,11 @@ export class UnitBuilder {
           return;
         }
         const v = this.value(init);
-        if (init.k === "call" && init.pure && s.uses >= 2) {
+        // a pure node is evaluated again at every consumer: a value that reads state (an own variable, an array length, a member
+        // getter) would see later writes, so it is stored where the const stands; so is a pure call used twice (it may be random)
+        const reads = readsState(init, this.unstable);
+        const snapshot = (init.k === "call" && init.pure && s.uses >= 2) || (reads && !s.nextOnly);
+        if (snapshot && v.nulls.length === 0 && !v.execOuts && !v.pendingNull && init.type !== "result") {
           const name = `abfc_${this.event.name}_t${this.tempCount++}`;
           this.vars.push({ name, type: init.type === "void" || init.type === "null" ? "name" : init.type, flags: ["transient"], origin: s.span, temp: true });
           const set = this.setVar(name, s.span);
@@ -745,6 +751,7 @@ export class UnitBuilder {
           this.locals.set(s.local, { temp: name });
           return;
         }
+        if (reads) this.unstable.add(s.local); // read right away by the next statement: still a live pure value there
         if (v.nulls.length > 0) this.unsupported("an optional chain bound to a constant", s.span);
         const info: LocalInfo = { pin: v.pin };
         if (v.execOuts) info.execOuts = v.execOuts;
@@ -1054,6 +1061,54 @@ function forLoopBound(s: Extract<HirStmt, { k: "forCount" }>): { bound: HirExpr;
   if (c.k !== "cmp" || c.kind !== "int" || (c.op !== "<" && c.op !== "<=")) return undefined;
   if (c.a.k !== "local" || c.a.id !== s.counter || !isPureBound(c.b, s.counter)) return undefined;
   return { bound: c.b, inclusive: c.op === "<=" };
+}
+
+/**
+ * Whether a pure expression reads state that a later statement can change, so that its value depends on when a consumer
+ * runs: own or other objects' variables, arrays, containers, and pure member calls. Literals, parameters, locals (stable:
+ * a literal, an exec node's output or a temp) and outputs of impure calls are fixed once evaluated.
+ */
+export function readsState(e: HirExpr, unstable: ReadonlySet<LocalId> = new Set()): boolean {
+  const r = (x: HirExpr): boolean => readsState(x, unstable);
+  switch (e.k) {
+    case "local":
+      return unstable.has(e.id);
+    case "getSelf":
+    case "getOn":
+    case "containerQuery":
+      return true;
+    case "call":
+      if (!e.pure) return false;
+      if (!e.static) return true;
+      return e.args.some((a) => r(a.value));
+    case "out":
+      return r(e.call);
+    case "field":
+      return r(e.obj);
+    case "length":
+      return r(e.array);
+    case "index":
+      return r(e.array) || r(e.index);
+    case "arrayFind":
+      return r(e.array) || r(e.value);
+    case "arith":
+    case "cmp":
+    case "eq":
+    case "and":
+    case "or":
+      return r(e.a) || r(e.b);
+    case "not":
+      return r(e.e);
+    case "isValid":
+    case "cast":
+      return r(e.value);
+    case "formatText":
+      return e.args.some((a) => r(a.value));
+    case "makeStruct":
+      return e.fields.some((f) => r(f.value));
+    default:
+      return false;
+  }
 }
 
 /** Whether evaluating the expression emits no exec node and no null exit, and does not read the loop counter. */

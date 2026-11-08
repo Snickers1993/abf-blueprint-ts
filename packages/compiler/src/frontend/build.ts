@@ -1093,7 +1093,9 @@ class HirBuilder {
     const id = this.nextLocal++;
     const fn = init.type === "result" ? this.callInfo.get(init) : undefined;
     if (sym) this.locals.set(sym, { id, name: d.name.text, type: init.type, poison: false, ...(fn ? { fn } : {}) });
-    return { k: "const", local: id, name: d.name.text, init, uses: sym ? this.countUses(sym, d.name) : 0, span: this.sp(node) };
+    const uses = sym ? this.countUses(sym, d.name) : 0;
+    const nextOnly = sym !== undefined && uses > 0 && this.usesOnlyInNext(node, sym, d.name, uses);
+    return { k: "const", local: id, name: d.name.text, init, uses, ...(nextOnly ? { nextOnly } : {}), span: this.sp(node) };
   }
 
   /** `await`: ABFC2086 inside a function (it finishes in one frame), otherwise unsupported. */
@@ -1106,6 +1108,29 @@ class HirBuilder {
       );
     }
     return this.sink.fail("ABFC2099", "await is not supported", node);
+  }
+
+  /** Whether all `uses` references to the const are inside the statement right after it (an if: its condition), which reads them once. */
+  private usesOnlyInNext(stmt: ts.Statement, sym: ts.Symbol, declName: ts.Node, uses: number): boolean {
+    const parent = stmt.parent;
+    if (!ts.isBlock(parent) && !ts.isSourceFile(parent)) return false;
+    const list = parent.statements;
+    const next = list[list.indexOf(stmt) + 1];
+    if (!next) return false;
+    // an if reads its condition once, before either branch runs; only uses in the condition count
+    const scope: ts.Node | undefined = ts.isIfStatement(next)
+      ? next.expression
+      : ts.isExpressionStatement(next) || ts.isVariableStatement(next) || ts.isReturnStatement(next)
+        ? next
+        : undefined;
+    if (!scope) return false;
+    let n = 0;
+    const walk = (x: ts.Node): void => {
+      if (ts.isIdentifier(x) && x !== declName && this.checker.getSymbolAtLocation(x) === sym) n++;
+      ts.forEachChild(x, walk);
+    };
+    walk(scope);
+    return n === uses;
   }
 
   private countUses(sym: ts.Symbol, declName: ts.Node): number {
@@ -1138,7 +1163,8 @@ class HirBuilder {
       return this.forEachCall(e, e.expression, this.sp(node));
     }
     const h = this.expr(e);
-    if (h.k !== "call" && h.k !== "optional" && h.k !== "callOwn") f.fail("ABFC2099", "this expression statement has no effect", e);
+    // spawnActor and createWidget have exec pins: a statement that drops the result still spawns or creates
+    if (h.k !== "call" && h.k !== "optional" && h.k !== "callOwn" && h.k !== "spawn" && h.k !== "createWidget") f.fail("ABFC2099", "this expression statement has no effect", e);
     return { k: "expr", e: h, span: this.sp(node) };
   }
 

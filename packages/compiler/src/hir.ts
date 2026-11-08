@@ -66,7 +66,8 @@ export type LocalId = number;
 export type HirStmt =
   | { k: "expr"; e: HirExpr; span: Span }
   | { k: "setSelf"; name: string; type: BpType; value: HirExpr; span: Span }
-  | { k: "const"; local: LocalId; name: string; init: HirExpr; uses: number; span: Span }
+  /** `nextOnly`: every use is inside the very next statement (an expression, const or return statement, or the condition of an if), read once right away. */
+  | { k: "const"; local: LocalId; name: string; init: HirExpr; uses: number; nextOnly?: boolean; span: Span }
   | { k: "if"; cond: HirExpr; then: HirStmt[]; else: HirStmt[]; span: Span }
   | { k: "return"; value?: HirExpr; span: Span }
   /** `index`: `arr.forEach((x, i) => ...)`: local of the index parameter (the loop index, int). */
