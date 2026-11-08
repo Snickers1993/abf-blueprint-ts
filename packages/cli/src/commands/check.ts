@@ -1,6 +1,6 @@
 import { watch as fsWatch } from "node:fs";
 import { join, relative } from "node:path";
-import { checkProject, loadProgram } from "@abfc/compiler";
+import { blockedMemberHits, checkProject, loadProgram } from "@abfc/compiler";
 import type { LoadedProgram } from "@abfc/compiler";
 import { AbfcError } from "@abfc/env";
 import { loadContext } from "../context.js";
@@ -26,6 +26,8 @@ export async function runCheck(ctx: CliContext, rec: Recorder, state?: { oldProg
       emitAll(ctx, loaded.diagnostics);
       const result = checkProject(loaded, compilerConfigOf(ctx.config), ctx.env.profile);
       emitAll(ctx, result.diagnostics);
+      // Blueprint filter hits are errors at publish (gate 2) only; check shows them as warnings so they are seen before a build
+      emitAll(ctx, blockedMemberHits(loaded).map((d) => ({ ...d, severity: "warning" as const })));
       const ok = result.ir !== null && !hasErrors(ctx);
       if (!ok) s.fail("TypeScript has errors");
       return { result, ok };
