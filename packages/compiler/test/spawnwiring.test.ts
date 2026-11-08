@@ -17,7 +17,7 @@ const profilePath = fileURLToPath(new URL("../../../env/profiles/ue5.4.4-1050002
 const profile = JSON.parse(readFileSync(profilePath, "utf8")) as Profile;
 const config = { mod: "TestMod" };
 
-function source(body: string): string {
+function source(body: string, members = ""): string {
   return `import { bindEvent, blueprint, event, nameOf, spawnActor } from "@abfc/runtime";
 import { BP_FakePot_C } from "/Game/Fake/BP_FakePot";
 import { Actor } from "/Script/FakeEngine";
@@ -31,19 +31,19 @@ export class BP_Counter extends Actor {
   Go(): void {
 ${body}
   }
-}
+${members}}
 `;
 }
 
 /** HIR of a one-event BP_Counter whose body is `body`, in a copy of the phase2 fixture. */
-function hirOf(body: string, allowTsErrors = false): HirProgram {
+function hirOf(body: string, allowTsErrors = false, members = ""): HirProgram {
   const dir = mkdtempSync(join(here, "wire-"));
   try {
     cpSync(phase2Dir, dir, { recursive: true });
     rmSync(join(dir, "src", "Phase2Bad.ts"));
     rmSync(join(dir, "src", "Counter.ts"));
     rmSync(join(dir, "src", "Director.ts"));
-    writeFileSync(join(dir, "src", "Wire.ts"), source(body), "utf8");
+    writeFileSync(join(dir, "src", "Wire.ts"), source(body, members), "utf8");
     const loaded = loadProgram(dir);
     if (!allowTsErrors) assert.deepEqual(loaded.diagnostics, []);
     const res = buildHir(loaded, config, profile);
@@ -54,8 +54,8 @@ function hirOf(body: string, allowTsErrors = false): HirProgram {
 }
 
 
-function irOf(body: string): IrModule {
-  const hir = hirOf(body);
+function irOf(body: string, members = ""): IrModule {
+  const hir = hirOf(body, false, members);
   assert.deepEqual(hir.diagnostics, []);
   const ir = lower(hir, profile);
   assert.deepEqual(validateIrModule(ir), []);
@@ -96,6 +96,25 @@ test("bindEvent lowers to Add Delegate on the source's dispatcher fed by Create 
   assert.ok(w.some(([x, y]) => x === `${sa!.id}.ReturnValue` && y === `${ad.id}.self`), "the source feeds Add Delegate");
   assert.ok(w.some(([x, y]) => x === `${cd.id}.OutputDelegate` && y === `${ad.id}.Delegate`));
   assert.ok(w.some(([x, y]) => x === `${sb!.id}.then` && y === `${ad.id}.execute`));
+});
+
+test("bindEvent(..., this, \"Event\") feeds Add Delegate from the own event's delegate pin, without Create Event", () => {
+  const ir = irOf(
+    "    const a = spawnActor(BP_FakePot_C, { collisionHandlingOverride: \"AlwaysSpawn\" });\n    bindEvent(a, \"ButtonPressed\", this, \"OnPressed\");",
+    "  @event\n  OnPressed(): void {}\n",
+  );
+  const nodes = nodesOf(ir);
+  assert.equal(nodes.filter((n) => n.t3d.class.endsWith("K2Node_CreateDelegate")).length, 0);
+  const ad = nodes.find((n) => n.t3d.class.endsWith("K2Node_AddDelegate"))!;
+  const go = ir.assets[0]!.units.find((u) => u.id === "event:Go")!;
+  assert.deepEqual(go.crossWires, [{ toUnit: "event:OnPressed", from: "ev0.OutputDelegate", to: `${ad.id}.Delegate` }]);
+  const sa = nodes.find((n) => n.sem?.k === "spawn")!;
+  assert.ok(wiresOf(ir).some(([x, y]) => x === `${sa.id}.ReturnValue` && y === `${ad.id}.self`));
+});
+
+test("bindEvent(..., this, name) needs an own @event", () => {
+  const hir = hirOf("    const a = spawnActor(BP_FakePot_C, {});\n    bindEvent(a, \"ButtonPressed\", this, \"Nope\");", true);
+  assert.ok(hir.diagnostics.some((d) => d.code === "ABFC2054"));
 });
 
 test("bindEvent needs string literal names", () => {

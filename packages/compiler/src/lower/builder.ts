@@ -749,15 +749,19 @@ export class UnitBuilder {
       case "bind": {
         // what a hand-made "Bind Event to <Dispatcher>" is: Add Delegate (Target = source) fed by Create Event (Target = target)
         const src = this.value(s.source);
-        const tgt = this.value(s.target);
-        const cd = this.emit("cdlg", "/Script/BlueprintGraph.K2Node_CreateDelegate", [`SelectedFunctionName="${s.fn}"`], undefined, s.span);
-        this.link(tgt.pin, `${cd}.${P.self}`);
+        const tgt = s.target === null ? null : this.value(s.target);
+        let cd: string | null = null;
+        if (tgt !== null) {
+          cd = this.emit("cdlg", "/Script/BlueprintGraph.K2Node_CreateDelegate", [`SelectedFunctionName="${s.fn}"`], undefined, s.span);
+          this.link(tgt.pin, `${cd}.${P.self}`);
+        }
         const ad = this.emit("adlg", "/Script/BlueprintGraph.K2Node_AddDelegate",
           [`DelegateReference=(MemberParent="${pinObjectText("object", s.sourceClass, this.classMeta)}",MemberName="${s.dispatcher}")`], undefined, s.span);
         this.execInto(ad);
         this.link(src.pin, `${ad}.${P.self}`);
-        this.link(`${cd}.OutputDelegate`, `${ad}.Delegate`);
-        const nulls = [...src.nulls, ...tgt.nulls];
+        if (cd !== null) this.link(`${cd}.OutputDelegate`, `${ad}.Delegate`);
+        else this.cross.push({ toUnit: `event:${s.fn}`, from: `${ENTRY_ID}.OutputDelegate`, to: `${ad}.Delegate` });
+        const nulls = [...src.nulls, ...(tgt?.nulls ?? [])];
         if (nulls.length > 0) this.cur = [...this.cur, ...nulls];
         return;
       }

@@ -67,7 +67,11 @@ export type HirStmt =
   | { k: "expr"; e: HirExpr; span: Span }
   | { k: "setSelf"; name: string; type: BpType; value: HirExpr; span: Span }
   /** `bindEvent(source, "Dispatcher", target, "Function")`: Add Delegate on the source's dispatcher with a Create Event of the target's function. `sourceClass` is the source's class path. */
-  | { k: "bind"; source: HirExpr; sourceClass: string; dispatcher: string; target: HirExpr; fn: string; span: Span }
+  /**
+   * `bindEvent(source, "Disp", target, "Fn")`. `ownEvent`: the target is `this` and Fn an own `@event`, bound through the
+   * event's own delegate pin (no Create Event node, as a hand-made "Bind Event" wired to a red event square).
+   */
+  | { k: "bind"; source: HirExpr; sourceClass: string; dispatcher: string; target: HirExpr | null; fn: string; ownEvent?: true; span: Span }
   /** `obj.Var = value` on another object (a Set node with its Target wired); `owner` is the class declaring the variable. */
   | { k: "setOn"; obj: HirExpr; owner: string; name: string; type: BpType; value: HirExpr; span: Span }
   /** `nextOnly`: every use is inside the very next statement (an expression, const or return statement, or the condition of an if), read once right away. */

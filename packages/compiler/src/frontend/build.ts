@@ -192,7 +192,7 @@ function directExprs(s: HirStmt): HirExpr[] {
     case "expr": return [s.e];
     case "setSelf": return [s.value];
     case "setOn": return [s.obj, s.value];
-    case "bind": return [s.source, s.target];
+    case "bind": return s.target === null ? [s.source] : [s.source, s.target];
     case "const": return [s.init];
     case "return": return s.value ? [s.value] : [];
     case "if": return [s.cond];
@@ -1178,10 +1178,17 @@ class HirBuilder {
     if (!srcArg || !dispArg || !tgtArg || !fnArg || e.arguments.length !== 4) return f.fail("ABFC2099", 'bindEvent(source, "Dispatcher", target, "Function") takes four arguments', e);
     if (!ts.isStringLiteral(dispArg) || !ts.isStringLiteral(fnArg)) return f.fail("ABFC2099", "bindEvent: the dispatcher and function names must be string literals", !ts.isStringLiteral(dispArg) ? dispArg : fnArg);
     const source = this.expr(srcArg);
-    const target = this.expr(tgtArg);
     if (!source.type.startsWith("object:")) return f.fail("ABFC2099", "bindEvent: the source must be an object", srcArg);
+    const sourceClass = source.type.slice("object:".length);
+    if (stripParens(tgtArg).kind === ts.SyntaxKind.ThisKeyword) {
+      // an own event: its delegate pin feeds Add Delegate straight away
+      const own = this.ownSigs.get(fnArg.text);
+      if (!own || own.kind !== "event") return f.fail("ABFC2054", `bindEvent(..., this, "${fnArg.text}"): ${fnArg.text} must be an own @event method`, fnArg);
+      return { k: "bind", source, sourceClass, dispatcher: dispArg.text, target: null, fn: fnArg.text, ownEvent: true, span: sp };
+    }
+    const target = this.expr(tgtArg);
     if (!target.type.startsWith("object:")) return f.fail("ABFC2099", "bindEvent: the target must be an object", tgtArg);
-    return { k: "bind", source, sourceClass: source.type.slice("object:".length), dispatcher: dispArg.text, target, fn: fnArg.text, span: sp };
+    return { k: "bind", source, sourceClass, dispatcher: dispArg.text, target, fn: fnArg.text, span: sp };
   }
 
   private assign(e: ts.BinaryExpression): HirStmt {
