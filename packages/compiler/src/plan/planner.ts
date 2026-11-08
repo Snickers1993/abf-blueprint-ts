@@ -674,8 +674,20 @@ export function planBuild(ir: IrModule, input: PlanInput): PlanResult {
     });
 
     const prefixes = picked.map((p) => `abfc_${p.unit.name}_`);
+    // A temp of a re-planned unit whose variable in the asset has another type (temps are numbered in source order, so a new
+    // temp earlier in the unit shifts the others) is removed and declared again with its new type.
+    const retypedTemps = new Set<string>();
+    for (const v of asset.variables) {
+      if (v.temp !== true || !declared.has(v.name) || !prefixes.some((pre) => v.name.startsWith(pre))) continue;
+      const onStage = input.snapshotVariableTypes?.get(asset.path)?.get(v.name);
+      if (onStage === undefined || sameBpType(onStage, v.type)) continue;
+      retypedTemps.add(v.name);
+      if (!removeVariables.includes(v.name)) removeVariables.push(v.name);
+    }
     const variables: IrVariable[] = asset.variables.filter(
-      (v) => (v.temp === true ? prefixes.some((pre) => v.name.startsWith(pre)) : true) && (!declared.has(v.name) || retypedInAsset.has(v.name) || retypedFields.has(v.name)),
+      (v) =>
+        (v.temp === true ? prefixes.some((pre) => v.name.startsWith(pre)) : true) &&
+        (!declared.has(v.name) || retypedInAsset.has(v.name) || retypedFields.has(v.name) || retypedTemps.has(v.name)),
     );
     // Entry nodes of cross wire targets that stay as they are: their real names come from the manifest.
     const entryNames: Record<string, string> = {};

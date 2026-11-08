@@ -22,6 +22,7 @@ abfc uses semantic versioning for its command-line surface: the commands, their 
 ### Changed
 
 - A `const` bound to a pure expression that reads state (an own variable, an array length or element, a member getter) is stored in a temp where it stands, so a use after a later write still sees the old value. It used to be a live pure node, re-read at every use: `const first = this.Pts.length` read the length after the pushes in a route parser and skipped every route. A const read only by the very next statement (or the next `if` condition) stays a plain pure value.
+- A temp variable whose type changed (temps are numbered in source order, so a new temp shifts the ones after it) is removed and declared again. The planner used to keep the old variable, and the Unreal compile failed with type mismatches on the temp Get and Set nodes.
 - `spawnActor(...)` and `createWidget(...)` can stand alone as statements (they were ABFC2099 "has no effect").
 - `real` and `double` are one type when an own variable's recorded or read-back type is compared: a `double` field no longer gets recreated (ABFC5014) on every build because the asset reports it as `real`.
 

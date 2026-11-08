@@ -130,6 +130,26 @@ test("pendingAdoption plans the unit with the adopted nodes removed; the origin 
   assert.deepEqual(r.plan.assets[0]!.graphNodes["EventGraph"]!.map((n) => n.name).sort(), ["CALL_1", "CE_1", "OTHER_1"]);
 });
 
+test("a temp of a re-planned unit whose variable has another type in the asset is removed and declared again", () => {
+  const t0 = ir.assets[0]!.variables.find((v) => v.name === "abfc_UpdateTarget_t0")!;
+  const other = t0.type === "array:string" ? "double" : "array:string";
+  const plan = (onStage: string) =>
+    planBuild(ir, {
+      manifests: new Map(),
+      snapshots: new Map([[asset, snapshotOf()]]),
+      stage,
+      handMadeUnits: new Map(),
+      snapshotVariables: new Map([[asset, ["abfc_UpdateTarget_t0"]]]),
+      snapshotVariableTypes: new Map([[asset, new Map([["abfc_UpdateTarget_t0", onStage]])]]),
+    }).plan.assets[0]!;
+  const shifted = plan(other); // a new temp earlier in the unit shifted the numbering
+  assert.deepEqual(shifted.removeVariables, ["abfc_UpdateTarget_t0"]);
+  assert.ok(shifted.variables.some((v) => v.name === "abfc_UpdateTarget_t0" && v.type === t0.type));
+  const same = plan(t0.type);
+  assert.equal(same.removeVariables, undefined);
+  assert.equal(same.variables.some((v) => v.name === "abfc_UpdateTarget_t0"), false, "an up-to-date temp is not declared again");
+});
+
 test("a changed adopted hand-made unit is replaced (TS wins): ABFC5014 names ABFC5004", () => {
   const entry = node("CE_1", EVENT, [`CustomFunctionName="UpdateTarget"`]);
   const snapshot = snapshotOf(entry);
