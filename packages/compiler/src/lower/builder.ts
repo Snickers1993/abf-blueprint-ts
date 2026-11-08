@@ -54,6 +54,16 @@ interface LoopCtx {
 
 const REAL_TYPES = new Set(["float", "double", "real"]);
 
+const MATH_LIBRARY = "/Script/Engine.KismetMathLibrary";
+/**
+ * Struct literals of core math structs lower to their native make functions instead of a Make Struct node, which the
+ * editor refuses on them ("is not a BlueprintType"). Fields left out of the literal get `fill` (default 0).
+ */
+const NATIVE_MAKE: Readonly<Record<string, { fn: string; pins: readonly string[]; fill?: string }>> = {
+  "/Script/CoreUObject.Vector": { fn: "MakeVector", pins: ["X", "Y", "Z"] },
+  "/Script/CoreUObject.Vector2D": { fn: "MakeVector2D", pins: ["X", "Y"] },
+  "/Script/CoreUObject.Rotator": { fn: "MakeRotator", pins: ["Roll", "Pitch", "Yaw"] },
+};
 const ARITH_NAMES = { "+": "Add", "-": "Subtract", "*": "Multiply", "/": "Divide" } as const;
 const CMP_NAMES = { "<": "Less", "<=": "LessEqual", ">": "Greater", ">=": "GreaterEqual" } as const;
 const K2_EVENT = "/Script/BlueprintGraph.K2Node_Event";
@@ -554,6 +564,20 @@ export class UnitBuilder {
         const nulls: Exit[] = [];
         const ops = e.fields.map((a) => ({ a, o: this.operand(a.value, a.value.type === "void" || a.value.type === "null" ? undefined : a.value.type) }));
         for (const x of ops) nulls.push(...x.o.nulls);
+        const native = NATIVE_MAKE[e.struct];
+        if (native) {
+          // core math structs are not BlueprintType: the editor refuses a Make Struct node on them, so use their native make
+          const id = this.pureCall(MATH_LIBRARY, native.fn, e.span);
+          const defaults: Record<string, string> = {};
+          for (const pin of native.pins) defaults[pin] = native.fill ?? "0.0";
+          for (const x of ops) {
+            if (!native.pins.includes(x.a.name)) this.unsupported(`field ${x.a.name} of ${shortName(e.struct)}`, e.span);
+            delete defaults[x.a.name];
+            this.feed(x.o, id, x.a.name, defaults);
+          }
+          this.settle(id, defaults);
+          return { pin: `${id}.${P.returnValue}`, nulls };
+        }
         const id = this.emit("mk", this.profile.nodeClasses.makeStruct,
           ["bMadeAfterOverridePinRemoval=True", `StructType="${pinObjectText("struct", e.struct, this.classMeta)}"`], undefined, e.span);
         const defaults: Record<string, string> = {};
