@@ -302,6 +302,7 @@ export class UnitBuilder {
     if (e.k === "enumLit") return { lit: e.text, nulls: [] };
     if (e.k === "nameLit") return { lit: escapeT3dString(e.text), nulls: [] };
     if (e.k === "classRef") return { obj: e.path, nulls: [] };
+    if (e.k === "assetRef") return { obj: e.text, nulls: [] };
     if (e.k === "delegateRef") return { delegate: e.event, nulls: [] };
     const v = this.value(e);
     return { pin: v.pin, nulls: v.nulls };
@@ -311,7 +312,10 @@ export class UnitBuilder {
   private feed(o: Operand, id: string, pin: string, defaults: Record<string, string>, objects?: Record<string, string>): void {
     if (o.pin !== undefined) this.link(o.pin, `${id}.${pin}`);
     else if (o.lit !== undefined) defaults[pin] = o.lit;
-    else if (o.obj !== undefined && objects) objects[pin] = o.obj;
+    else if (o.obj !== undefined) {
+      if (!objects) throw new Error(`ABFC2099: a class or asset reference cannot feed ${pin} here; pass it to a call or assign it to a variable`);
+      objects[pin] = o.obj;
+    }
     else if (o.delegate !== undefined) this.cross.push({ toUnit: `event:${o.delegate}`, from: `${ENTRY_ID}.OutputDelegate`, to: `${id}.${pin}` });
   }
 
@@ -562,6 +566,7 @@ export class UnitBuilder {
       case "or":
       case "execIs":
       case "classRef":
+      case "assetRef":
       case "delegateRef":
       case "enumLit":
       case "nameLit":
@@ -693,8 +698,9 @@ export class UnitBuilder {
         if (!(s.value.k === "lit" && s.value.value === null)) o = this.operand(s.value, s.type);
         const id = this.setVar(s.name, s.span);
         this.execInto(id);
-        if (o) this.feed(o, id, s.name, defaults);
-        if (Object.keys(defaults).length > 0) this.nodes.find((n) => n.id === id)!.pinDefaults = defaults;
+        const objects: Record<string, string> = {};
+        if (o) this.feed(o, id, s.name, defaults, objects);
+        this.settle(id, defaults, objects);
         if (o && o.nulls.length > 0) this.cur = [...this.cur, ...o.nulls];
         return;
       }
@@ -808,9 +814,10 @@ export class UnitBuilder {
         this.execInto(id);
         this.link(arr, `${id}.${P.arrayLengthArray}`);
         const defaults: Record<string, string> = {};
-        for (const { o, pin } of ops) this.feed(o, id, pin, defaults);
+        const objects: Record<string, string> = {};
+        for (const { o, pin } of ops) this.feed(o, id, pin, defaults, objects);
         if (s.op === "set") defaults.bSizeToFit = "false";
-        this.settle(id, defaults);
+        this.settle(id, defaults, objects);
         const nulls = ops.flatMap(({ o }) => o.nulls);
         if (nulls.length > 0) this.cur = [...this.cur, ...nulls];
         return;

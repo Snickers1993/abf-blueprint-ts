@@ -105,3 +105,14 @@ test("`/` on ints is still ABFC2010", () => {
   const hir = hirOf("    this.Count = this.Count / 2;");
   assert.deepEqual(codes(hir.diagnostics), ["ABFC2010"]);
 });
+
+test("`/` on reals lowers to Divide_DoubleDouble", () => {
+  const hir = hirOf("    this.Elapsed = this.Elapsed / 2;");
+  assert.deepEqual(hir.diagnostics, []);
+  const ir = lower(hir, profile);
+  assert.deepEqual(validateIrModule(ir), []);
+  const nodes: IrNode[] = ir.assets.flatMap((a) => a.units.flatMap((u) => u.nodes));
+  const div = nodes.filter((n) => n.sem?.k === "call" && n.sem.function === "Divide_DoubleDouble");
+  assert.equal(div.length, 1);
+  assert.deepEqual(div[0]!.pinDefaults, { B: "2.0" });
+});

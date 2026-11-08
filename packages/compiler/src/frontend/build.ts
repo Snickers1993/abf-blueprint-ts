@@ -1786,6 +1786,27 @@ class HirBuilder {
     return ci ? { path: ci.path, meta: ci.meta, castPin: ci.castPin, sym } : undefined;
   }
 
+  /**
+   * `asset(Class, "/Mod/Dir/Asset")` or `asset(Class, "@mod/Dir/Asset")`: a hard reference to an existing asset, written as the
+   * default object of the pin it is passed to (no load node, so it cooks with the Blueprint). Only valid as a call argument.
+   */
+  private assetExpr(node: ts.CallExpression, sp: Span): HirExpr {
+    const f: DiagSink = this.sink;
+    const [clsArg, pathArg] = node.arguments;
+    if (node.arguments.length !== 2 || !pathArg || !(ts.isStringLiteral(pathArg) || ts.isNoSubstitutionTemplateLiteral(pathArg))) {
+      return f.fail("ABFC2099", "asset(Class, path) takes a class and one string literal path", node);
+    }
+    const ci = this.classArg(clsArg);
+    if (!ci) return f.fail("ABFC2060", "the asset class has no Blueprint metadata (@bpPath)", clsArg ?? node);
+    let path = pathArg.text;
+    if (path.startsWith("@mod/")) path = `/${this.mod}/${path.slice("@mod/".length)}`;
+    if (!/^\/[A-Za-z0-9_]+(\/[A-Za-z0-9_]+)+(\.[A-Za-z0-9_]+)?$/.test(path) || path.startsWith("/Script/")) {
+      return f.fail("ABFC2099", `asset path "${pathArg.text}" must be a package path such as "/Game/Dir/Asset" or "@mod/Dir/Asset"`, pathArg);
+    }
+    if (!path.includes(".")) path = `${path}.${path.slice(path.lastIndexOf("/") + 1)}`;
+    return { k: "assetRef", text: `${ci.path}'${path}'`, type: `object:${ci.path}`, span: sp };
+  }
+
   private callExpr(node: ts.CallExpression, sp: Span): HirExpr {
     const f: DiagSink = this.sink;
     const callee = node.expression;
@@ -1818,6 +1839,7 @@ class HirBuilder {
         if (kind !== "int") return f.fail("ABFC2012", `idiv takes int operands, not ${a.type}`, node);
         return { k: "arith", op: "/", kind: "int", a, b, type: "int", span: sp };
       }
+      if (rt === "asset") return this.assetExpr(node, sp);
       if (rt === "createWidget") return this.createWidgetExpr(node, sp);
       if (rt === "spawnActor") return this.spawnExpr(node, sp);
       if (callee.text === "eval") return f.fail("ABFC2020", "eval is not supported", node);
@@ -2012,8 +2034,8 @@ class HirBuilder {
           const t = bpTypeOf(this.checker, this.checker.getTypeAtLocation(x));
           return t === undefined ? undefined : kindOfBpType(t);
         });
-        if (kinds.includes("int") || kinds.includes("byte")) f.fail("ABFC2010", "`/` on integer values is not supported; use idiv(a, b)", node);
-        return f.fail("ABFC2099", "`/` on real values is not supported", node);
+        if (kinds.includes("int") || kinds.includes("byte")) return f.fail("ABFC2010", "`/` on integer values is not supported; use idiv(a, b)", node);
+        return this.arithExpr(node, "/", sp); // Divide_DoubleDouble
       }
       default:
         return f.fail("ABFC2099", `operator ${node.operatorToken.getText()} is not supported`, node.operatorToken);
@@ -2053,7 +2075,7 @@ class HirBuilder {
     return { a, b, kind };
   }
 
-  private arithExpr(node: ts.BinaryExpression, op: "+" | "-" | "*", sp: Span): HirExpr {
+  private arithExpr(node: ts.BinaryExpression, op: "+" | "-" | "*" | "/", sp: Span): HirExpr {
     const { a, b, kind } = this.numericOperands(node);
     return { k: "arith", op, kind, a, b, type: kind === "int" ? "int" : "double", span: sp };
   }

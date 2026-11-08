@@ -92,6 +92,12 @@ export declare function event(m: (this: any, ...a: any[]) => void, ctx: ClassMet
 export declare function override(m: (this: any, ...a: any[]) => void, ctx: ClassMethodDecoratorContext): void;
 export declare function createWidget<T>(cls: abstract new (...a: never[]) => T, owningPlayer: object | null): T;
 export declare function spawnActor<T>(cls: abstract new (...a: never[]) => T, opts?: SpawnOptions): T;
+/**
+ * A hard reference to an existing asset (mesh, material, sound, data asset): `asset(StaticMesh, "@mod/Meshes/SM_Crate")` or
+ * `asset(SoundBase, "/Game/Audio/S_Beep")`. Only as an argument of a call: it becomes that pin's default object, so the
+ * asset cooks with the Blueprint and needs no load node. The path is a string literal; `@mod/` means the mod being built.
+ */
+export declare function asset<T>(cls: abstract new (...a: never[]) => T, path: string): T;
 export declare function nameOf(text: string): name;
 export declare function cast<T>(value: object | null | undefined, cls: abstract new (...a: never[]) => T): T | null;
 export declare function isValid<T>(value: T | null | undefined): value is T;

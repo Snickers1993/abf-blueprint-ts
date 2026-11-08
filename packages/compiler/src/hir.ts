@@ -119,6 +119,8 @@ export type HirExpr = (
   | { k: "callOwn"; name: string; args: Array<{ pin: string; value: HirExpr }> }
   /** A Blueprint class used as a value (`WBP_X_C` in a class-typed argument). */
   | { k: "classRef"; path: string }
+  /** An asset used as a pin's default object (`asset(StaticMesh, "@mod/Meshes/SM_X")`); `text` is the full object text `<class>'<package>.<name>'`. */
+  | { k: "assetRef"; text: string }
   /** A reference to an owned event passed to a delegate-typed parameter (`this.ScanPlayers`). */
   | { k: "delegateRef"; event: string }
   /** Enum value as its T3D text. */
