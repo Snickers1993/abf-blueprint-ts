@@ -4,7 +4,8 @@
 export type int = number & { readonly __bpNumber?: "int" };
 export type int64 = number & { readonly __bpNumber?: "int64" };
 export type byte = number & { readonly __bpNumber?: "byte" };
-export type float = number & { readonly __bpNumber?: "float" };
+/** A float pin also takes a double: the editor converts real to float on the pin, as when wiring it by hand. */
+export type float = number & { readonly __bpNumber?: "float" | "double" };
 export type double = number & { readonly __bpNumber?: "double" };
 
 export type name = string & { readonly __bpString?: "name" };

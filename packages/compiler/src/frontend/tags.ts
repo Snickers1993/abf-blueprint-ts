@@ -276,8 +276,10 @@ function literalOfProperty(checker: ts.TypeChecker, type: ts.Type, prop: string)
   if (!sym) return undefined;
   const t = checker.getTypeOfSymbol(sym);
   const members = t.isUnion() ? t.types : [t];
-  const lit = members.find((m): m is ts.StringLiteralType => m.isStringLiteral());
-  return lit?.value;
+  const lits = members.filter((m): m is ts.StringLiteralType => m.isStringLiteral()).map((m) => m.value);
+  // `float` is branded "float" | "double" (a float pin takes a double); it is still a float
+  if (prop === "__bpNumber" && lits.includes("float")) return "float";
+  return lits[0];
 }
 
 /** Union members without null/undefined (a boolean union stays one member). */

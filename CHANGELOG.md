@@ -10,6 +10,8 @@ abfc uses semantic versioning for its command-line surface: the commands, their 
 
 ### Added
 
+- A `float` parameter or field takes a `double` (the editor converts real to float on the pin, as when wired by hand); `float` stays its own Blueprint type. `KismetSystemLibrary.Delay(this.Seconds)` with a double field no longer needs a float copy.
+
 - `asset(Class, path)` in `@abfc/runtime`: a hard reference to an existing asset (`asset(StaticMesh, "@mod/Meshes/SM_Crate")`, `asset(SoundBase, "/Game/Audio/S_Beep")`) as the default object of the pin it feeds: a call argument, an array `push` or element write, or a variable set. No load node, so the asset cooks with the Blueprint. `@mod/` names the mod being built; a path without an object name gets the asset name appended. A path that is not a package path is ABFC2099. A class or asset reference that reaches a pin that cannot hold a default object now fails the build instead of being dropped.
 - `spawnActor(Class, { transform })`: spawn at a Transform (`KismetMathLibrary.MakeTransform(...)`), so Begin Play already sees the place. Without it the actor spawns at the origin, as before.
 - `other.Var = value` sets a variable of another object (a Set node with its Target wired), e.g. a station's `StationId` right after spawning it.
