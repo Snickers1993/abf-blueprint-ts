@@ -37,6 +37,8 @@ export type DelegateRef = { readonly __bpDelegate?: true } | ((...a: any[]) => v
 export interface SpawnOptions {
   owner?: object | null;
   instigator?: object | null;
+  /** Where the actor spawns (a Transform, e.g. `KismetMathLibrary.MakeTransform(loc, rot, scale)`); default: the world origin. */
+  transform?: object;
   collisionHandlingOverride?: EnumText<"/Script/Engine.ESpawnActorCollisionHandlingMethod">;
   transformScaleMethod?: EnumText<"/Script/Engine.ESpawnActorScaleMethod">;
 }
@@ -98,6 +100,11 @@ export declare function spawnActor<T>(cls: abstract new (...a: never[]) => T, op
  * asset cooks with the Blueprint and needs no load node. The path is a string literal; `@mod/` means the mod being built.
  */
 export declare function asset<T>(cls: abstract new (...a: never[]) => T, path: string): T;
+/**
+ * Binds `target`'s function or event `fn` to `source`'s event dispatcher (Bind Event to <Dispatcher>): Add Delegate plus
+ * Create Event. Both names are string literals; the function's signature must match the dispatcher's. A statement only.
+ */
+export declare function bindEvent(source: object, dispatcher: string, target: object, fn: string): void;
 export declare function nameOf(text: string): name;
 export declare function cast<T>(value: object | null | undefined, cls: abstract new (...a: never[]) => T): T | null;
 export declare function isValid<T>(value: T | null | undefined): value is T;

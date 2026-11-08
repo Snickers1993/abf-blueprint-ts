@@ -64,6 +64,27 @@ const NATIVE_MAKE: Readonly<Record<string, { fn: string; pins: readonly string[]
   "/Script/CoreUObject.Vector2D": { fn: "MakeVector2D", pins: ["X", "Y"] },
   "/Script/CoreUObject.Rotator": { fn: "MakeRotator", pins: ["Roll", "Pitch", "Yaw"] },
 };
+/**
+ * Pin default text of a core math struct literal whose fields are all number literals, in the struct's text order:
+ * a Vector pin reads "X,Y,Z" and a Rotator pin "Pitch,Yaw,Roll" (as the editor writes them). Such a literal fed straight
+ * into a pin needs no make node; a missing field is 0.
+ */
+const LITERAL_STRUCT_ORDER: Readonly<Record<string, readonly string[]>> = {
+  "/Script/CoreUObject.Vector": ["X", "Y", "Z"],
+  "/Script/CoreUObject.Vector2D": ["X", "Y"],
+  "/Script/CoreUObject.Rotator": ["Pitch", "Yaw", "Roll"],
+};
+export function structLiteralText(e: HirExpr): string | undefined {
+  if (e.k !== "makeStruct") return undefined;
+  const order = LITERAL_STRUCT_ORDER[e.struct];
+  if (!order) return undefined;
+  const vals: Record<string, number> = {};
+  for (const f of e.fields) {
+    if (f.value.k !== "lit" || typeof f.value.value !== "number" || !order.includes(f.name)) return undefined;
+    vals[f.name] = f.value.value;
+  }
+  return order.map((n) => (vals[n] ?? 0).toFixed(6)).join(",");
+}
 const ARITH_NAMES = { "+": "Add", "-": "Subtract", "*": "Multiply", "/": "Divide" } as const;
 const CMP_NAMES = { "<": "Less", "<=": "LessEqual", ">": "Greater", ">=": "GreaterEqual" } as const;
 const K2_EVENT = "/Script/BlueprintGraph.K2Node_Event";
@@ -313,6 +334,8 @@ export class UnitBuilder {
     }
     if (e.k === "enumLit") return { lit: e.text, nulls: [] };
     if (e.k === "nameLit") return { lit: escapeT3dString(e.text), nulls: [] };
+    const structLit = structLiteralText(e);
+    if (structLit !== undefined) return { lit: structLit, nulls: [] };
     if (e.k === "classRef") return { obj: e.path, nulls: [] };
     if (e.k === "assetRef") return { obj: e.text, nulls: [] };
     if (e.k === "delegateRef") return { delegate: e.event, nulls: [] };
@@ -474,18 +497,22 @@ export class UnitBuilder {
       }
       case "spawn": {
         const owner = e.owner ? this.optOperand(e.owner) : undefined;
-        const mk = this.pureCall(this.profile.functions.addInt.class, "MakeTransform", e.span, {
-          pinDefaults: { Location: "0, 0, 0", Rotation: "0, 0, 0", Scale: "1.000000,1.000000,1.000000" },
-        });
+        const where = e.transform ? this.operand(e.transform) : undefined;
+        const mk = where
+          ? undefined
+          : this.pureCall(this.profile.functions.addInt.class, "MakeTransform", e.span, {
+              pinDefaults: { Location: "0, 0, 0", Rotation: "0, 0, 0", Scale: "1.000000,1.000000,1.000000" },
+            });
         const defaults: Record<string, string> = {};
         if (e.collision !== undefined) defaults.CollisionHandlingOverride = e.collision;
         if (e.scale !== undefined) defaults.TransformScaleMethod = e.scale;
         const id = this.emit("spawn", K2_SPAWN_ACTOR, [], { k: "spawn" }, e.span, { pinObjects: { Class: e.cls } });
         this.execInto(id);
-        this.link(`${mk}.${P.returnValue}`, `${id}.SpawnTransform`);
+        if (where) this.feed(where, id, "SpawnTransform", defaults);
+        else this.link(`${mk}.${P.returnValue}`, `${id}.SpawnTransform`);
         if (owner) this.feed(owner, id, "Owner", defaults);
         this.settle(id, defaults);
-        return { pin: `${id}.${P.returnValue}`, nulls: owner?.nulls ?? [] };
+        return { pin: `${id}.${P.returnValue}`, nulls: [...(owner?.nulls ?? []), ...(where?.nulls ?? [])] };
       }
       case "arith":
       case "cmp": {
@@ -716,6 +743,35 @@ export class UnitBuilder {
       case "expr": {
         const v = this.value(s.e);
         if (v.nulls.length > 0) this.cur = [...this.cur, ...v.nulls];
+        return;
+      }
+      case "bind": {
+        // what a hand-made "Bind Event to <Dispatcher>" is: Add Delegate (Target = source) fed by Create Event (Target = target)
+        const src = this.value(s.source);
+        const tgt = this.value(s.target);
+        const cd = this.emit("cdlg", "/Script/BlueprintGraph.K2Node_CreateDelegate", [`SelectedFunctionName="${s.fn}"`], undefined, s.span);
+        this.link(tgt.pin, `${cd}.${P.self}`);
+        const ad = this.emit("adlg", "/Script/BlueprintGraph.K2Node_AddDelegate",
+          [`DelegateReference=(MemberParent="${pinObjectText("object", s.sourceClass, this.classMeta)}",MemberName="${s.dispatcher}")`], undefined, s.span);
+        this.execInto(ad);
+        this.link(src.pin, `${ad}.${P.self}`);
+        this.link(`${cd}.OutputDelegate`, `${ad}.Delegate`);
+        const nulls = [...src.nulls, ...tgt.nulls];
+        if (nulls.length > 0) this.cur = [...this.cur, ...nulls];
+        return;
+      }
+      case "setOn": {
+        const target = this.value(s.obj);
+        const defaults: Record<string, string> = {};
+        const o = s.value.k === "lit" && s.value.value === null ? null : this.operand(s.value, s.type);
+        const id = this.emit("set", this.profile.nodeClasses.variableSet, [this.varRef(s.name, s.owner)], { k: "set", name: s.name, class: s.owner }, s.span);
+        this.execInto(id);
+        this.link(target.pin, `${id}.${P.self}`);
+        const objects: Record<string, string> = {};
+        if (o) this.feed(o, id, s.name, defaults, objects);
+        this.settle(id, defaults, objects);
+        const nulls = [...target.nulls, ...(o?.nulls ?? [])];
+        if (nulls.length > 0) this.cur = [...this.cur, ...nulls];
         return;
       }
       case "setSelf": {

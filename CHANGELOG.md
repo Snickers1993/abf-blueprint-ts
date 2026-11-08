@@ -11,6 +11,10 @@ abfc uses semantic versioning for its command-line surface: the commands, their 
 ### Added
 
 - `asset(Class, path)` in `@abfc/runtime`: a hard reference to an existing asset (`asset(StaticMesh, "@mod/Meshes/SM_Crate")`, `asset(SoundBase, "/Game/Audio/S_Beep")`) as the default object of the pin it feeds: a call argument, an array `push` or element write, or a variable set. No load node, so the asset cooks with the Blueprint. `@mod/` names the mod being built; a path without an object name gets the asset name appended. A path that is not a package path is ABFC2099. A class or asset reference that reaches a pin that cannot hold a default object now fails the build instead of being dropped.
+- `spawnActor(Class, { transform })`: spawn at a Transform (`KismetMathLibrary.MakeTransform(...)`), so Begin Play already sees the place. Without it the actor spawns at the origin, as before.
+- `other.Var = value` sets a variable of another object (a Set node with its Target wired), e.g. a station's `StationId` right after spawning it.
+- `bindEvent(source, "Dispatcher", target, "Function")` binds another object's function or event to an object's event dispatcher (Add Delegate fed by Create Event), as a hand-made "Bind Event to ..." does.
+- A `Vector`, `Vector2D` or `Rotator` literal whose fields are all numbers, fed straight into a pin, is the pin's default text (no make node): a spawn at a literal place is two nodes.
 - `/` on real values lowers to `Divide_DoubleDouble` (it was ABFC2099). `/` on integers stays ABFC2010 (use `idiv`).
 - `abfc generate` with `stubs.modAssets: "all"` skips mod packages whose name table has no `BlueprintGeneratedClass` (meshes, textures, materials, sounds) before reading them through the backend. Each read is a headless export of 15-18 s, so a mod of 877 assets went from about 4 hours to the Blueprints only.
 - Struct literals of `Vector`, `Vector2D` and `Rotator` lower to `MakeVector`, `MakeVector2D` and `MakeRotator` (KismetMathLibrary). A Make Struct node on these core structs fails the Unreal compile ("is not a BlueprintType"), found on the first real build of an RTS Blueprint.

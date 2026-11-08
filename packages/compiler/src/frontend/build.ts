@@ -128,7 +128,7 @@ function children(e: HirExpr): HirExpr[] {
     case "length": return [e.array];
     case "callOwn": return e.args.map((a) => a.value);
     case "createWidget": return [e.owner];
-    case "spawn": return e.owner ? [e.owner] : [];
+    case "spawn": return [...(e.owner ? [e.owner] : []), ...(e.transform ? [e.transform] : [])];
     case "arith": return [e.a, e.b];
     case "cmp": return [e.a, e.b];
     case "index": return [e.array, e.index];
@@ -191,6 +191,8 @@ function directExprs(s: HirStmt): HirExpr[] {
   switch (s.k) {
     case "expr": return [s.e];
     case "setSelf": return [s.value];
+    case "setOn": return [s.obj, s.value];
+    case "bind": return [s.source, s.target];
     case "const": return [s.init];
     case "return": return s.value ? [s.value] : [];
     case "if": return [s.cond];
@@ -1162,10 +1164,24 @@ class HirBuilder {
     if (ts.isCallExpression(e) && ts.isPropertyAccessExpression(e.expression) && e.expression.name.text === "forEach" && this.isArrayNode(e.expression.expression)) {
       return this.forEachCall(e, e.expression, this.sp(node));
     }
+    if (ts.isCallExpression(e) && runtimeName(this.checker, e) === "bindEvent") return this.bindEvent(e, this.sp(node));
     const h = this.expr(e);
     // spawnActor and createWidget have exec pins: a statement that drops the result still spawns or creates
     if (h.k !== "call" && h.k !== "optional" && h.k !== "callOwn" && h.k !== "spawn" && h.k !== "createWidget") f.fail("ABFC2099", "this expression statement has no effect", e);
     return { k: "expr", e: h, span: this.sp(node) };
+  }
+
+  /** `bindEvent(source, "Dispatcher", target, "Function")` as a statement. */
+  private bindEvent(e: ts.CallExpression, sp: Span): HirStmt {
+    const f: DiagSink = this.sink;
+    const [srcArg, dispArg, tgtArg, fnArg] = e.arguments;
+    if (!srcArg || !dispArg || !tgtArg || !fnArg || e.arguments.length !== 4) return f.fail("ABFC2099", 'bindEvent(source, "Dispatcher", target, "Function") takes four arguments', e);
+    if (!ts.isStringLiteral(dispArg) || !ts.isStringLiteral(fnArg)) return f.fail("ABFC2099", "bindEvent: the dispatcher and function names must be string literals", !ts.isStringLiteral(dispArg) ? dispArg : fnArg);
+    const source = this.expr(srcArg);
+    const target = this.expr(tgtArg);
+    if (!source.type.startsWith("object:")) return f.fail("ABFC2099", "bindEvent: the source must be an object", srcArg);
+    if (!target.type.startsWith("object:")) return f.fail("ABFC2099", "bindEvent: the target must be an object", tgtArg);
+    return { k: "bind", source, sourceClass: source.type.slice("object:".length), dispatcher: dispArg.text, target, fn: fnArg.text, span: sp };
   }
 
   private assign(e: ts.BinaryExpression): HirStmt {
@@ -1187,8 +1203,21 @@ class HirBuilder {
       const elem = self.type.slice("array:".length);
       return { k: "arrayOp", op: "set", array: self, index, value: this.expr(e.right, elem), span: this.sp(e) };
     }
+    if (ts.isPropertyAccessExpression(left) && left.expression.kind !== ts.SyntaxKind.ThisKeyword) {
+      // other.Var = value: a Set node on another object (a spawned actor's exposed variable)
+      const sym = this.checker.getSymbolAtLocation(left.name);
+      const path = sym ? bpPathOf(sym) : undefined;
+      const mp = path === undefined ? undefined : splitMemberPath(path);
+      if (!sym || !mp) return f.fail("ABFC2060", `member ${left.name.text} has no Blueprint metadata (@bpPath)`, left.name);
+      const type = bpTypeOfMember(sym);
+      if (type === undefined || ts.isMethodDeclaration(sym.valueDeclaration ?? left)) return f.fail("ABFC2099", `${left.name.text} is not a Blueprint variable`, left.name);
+      if (/^(array|map|set):/.test(type)) return f.fail("ABFC2041", "an array, Map or Set of another object cannot be assigned; use its own functions", left);
+      const obj = this.expr(left.expression);
+      if (!obj.type.startsWith("object:")) return f.fail("ABFC2099", "assignment target must be an object", left.expression);
+      return { k: "setOn", obj, owner: mp.owner, name: mp.name, type, value: this.expr(e.right, type), span: this.sp(e) };
+    }
     if (!ts.isPropertyAccessExpression(left) || left.expression.kind !== ts.SyntaxKind.ThisKeyword) {
-      return f.fail("ABFC2099", "assignment is only supported as this.<variable> = value or this.<array>[i] = value", e);
+      return f.fail("ABFC2099", "assignment is only supported as this.<variable> = value, other.<variable> = value or this.<array>[i] = value", e);
     }
     const sym = this.checker.getSymbolAtLocation(left.name);
     if (!sym) return f.fail("ABFC2060", `member ${left.name.text} has no Blueprint metadata (@bpPath)`, left.name);
@@ -1982,6 +2011,7 @@ class HirBuilder {
     if (!ci) return f.fail("ABFC2060", "the spawned class has no Blueprint metadata (@bpPath)", clsArg);
     this.classMeta[ci.path] = ci.meta;
     let owner: HirExpr | undefined;
+    let transform: HirExpr | undefined;
     let collision: string | undefined;
     let scale: string | undefined;
     if (optsArg) {
@@ -1992,18 +2022,23 @@ class HirBuilder {
         const init = p.initializer;
         const text = ts.isStringLiteral(init) || ts.isNoSubstitutionTemplateLiteral(init) ? init.text : undefined;
         if (key === "owner") owner = this.expr(init);
+        else if (key === "transform") {
+          transform = this.expr(init, "struct:/Script/CoreUObject.Transform");
+          if (transform.type !== "struct:/Script/CoreUObject.Transform") return f.fail("ABFC2056", "spawnActor option transform must be a Transform", init);
+        }
         else if (key === "collisionHandlingOverride" || key === "transformScaleMethod") {
           if (text === undefined) return f.fail("ABFC2056", `spawnActor option ${key} must be a string literal (the enum text)`, init);
           if (key === "collisionHandlingOverride") collision = text;
           else scale = text;
         } else if (key === "instigator") return f.fail("ABFC2056", "spawnActor option instigator is not supported yet", p);
-        else return f.fail("ABFC2056", `unknown spawnActor option "${key}" (owner, collisionHandlingOverride, transformScaleMethod)`, p.name);
+        else return f.fail("ABFC2056", `unknown spawnActor option "${key}" (owner, transform, collisionHandlingOverride, transformScaleMethod)`, p.name);
       }
     }
     return {
       k: "spawn",
       cls: ci.path,
       ...(owner ? { owner } : {}),
+      ...(transform ? { transform } : {}),
       ...(collision !== undefined ? { collision } : {}),
       ...(scale !== undefined ? { scale } : {}),
       type: `object:${ci.path}`,

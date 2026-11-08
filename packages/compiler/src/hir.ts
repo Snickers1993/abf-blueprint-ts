@@ -66,6 +66,10 @@ export type LocalId = number;
 export type HirStmt =
   | { k: "expr"; e: HirExpr; span: Span }
   | { k: "setSelf"; name: string; type: BpType; value: HirExpr; span: Span }
+  /** `bindEvent(source, "Dispatcher", target, "Function")`: Add Delegate on the source's dispatcher with a Create Event of the target's function. `sourceClass` is the source's class path. */
+  | { k: "bind"; source: HirExpr; sourceClass: string; dispatcher: string; target: HirExpr; fn: string; span: Span }
+  /** `obj.Var = value` on another object (a Set node with its Target wired); `owner` is the class declaring the variable. */
+  | { k: "setOn"; obj: HirExpr; owner: string; name: string; type: BpType; value: HirExpr; span: Span }
   /** `nextOnly`: every use is inside the very next statement (an expression, const or return statement, or the condition of an if), read once right away. */
   | { k: "const"; local: LocalId; name: string; init: HirExpr; uses: number; nextOnly?: boolean; span: Span }
   | { k: "if"; cond: HirExpr; then: HirStmt[]; else: HirStmt[]; span: Span }
@@ -128,7 +132,8 @@ export type HirExpr = (
   | { k: "enumLit"; text: string; enumPath: string }
   | { k: "nameLit"; text: string }
   | { k: "createWidget"; cls: string; owner: HirExpr }
-  | { k: "spawn"; cls: string; owner?: HirExpr; collision?: string; scale?: string }
+  /** `transform`: the SpawnTransform (absent: identity). */
+  | { k: "spawn"; cls: string; owner?: HirExpr; transform?: HirExpr; collision?: string; scale?: string }
   | { k: "arith"; op: "+" | "-" | "*" | "/"; kind: "int" | "real"; a: HirExpr; b: HirExpr }
   | { k: "cmp"; op: "<" | "<=" | ">" | ">="; kind: "int" | "real"; a: HirExpr; b: HirExpr }
   | { k: "index"; array: HirExpr; index: HirExpr; elem: BpType }
