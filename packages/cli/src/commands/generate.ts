@@ -53,7 +53,20 @@ const MAX_REFLECT_ROUNDS = 6;
 /** The backend's refusal to read an asset of another class (`<asset> is not a Blueprint (<Class>)`, `<asset> is a <Class>, not a Blueprint`). */
 const NOT_A_BLUEPRINT = /not a Blueprint/i;
 
-/** Every `*.uasset` below `<modDir>\Content`, as `/<mod>/<path without extension>`. */
+/**
+ * False only for a package that certainly holds no Blueprint: its name table lacks `BlueprintGeneratedClass` (which also
+ * matches Widget and Anim Blueprints). Meshes, textures, materials and sounds are most of a mod, and each one read through
+ * the backend costs a headless export (15-18 s), so they are skipped before the read. Unreadable files are kept.
+ */
+function mayBeBlueprint(host: CliContext["deps"]["host"], file: string): boolean {
+  try {
+    return host.readFile(file).includes("BlueprintGeneratedClass");
+  } catch {
+    return true;
+  }
+}
+
+/** Every `*.uasset` below `<modDir>\Content` that may be a Blueprint, as `/<mod>/<path without extension>`. */
 function listModAssets(ctx: CliContext, modDir: string): string[] {
   const host = ctx.deps.host;
   const out: string[] = [];
@@ -61,6 +74,7 @@ function listModAssets(ctx: CliContext, modDir: string): string[] {
     for (const name of host.readDir(dir)) {
       if (SKIPPED_FOLDERS.includes(name)) continue;
       if (name.toLowerCase().endsWith(".uasset")) {
+        if (!mayBeBlueprint(host, win32.join(dir, name))) continue;
         out.push(`/${ctx.config.mod.name}/${rel}${name.slice(0, -".uasset".length)}`);
       } else if (!name.includes(".")) {
         walk(win32.join(dir, name), `${rel}${name}/`);
