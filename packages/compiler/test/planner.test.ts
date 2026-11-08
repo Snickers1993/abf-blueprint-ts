@@ -635,6 +635,22 @@ test("a retyped own field is removed and re-added with the new type (ABFC2047 wa
   assert.ok(lacking.plan.assets[0]!.variables.some((v) => v.name === "Score" && v.type === "float"));
 });
 
+test("a double field the asset reads back as real is not recreated (real and double are one type)", () => {
+  const snapshot = snapshotOf(node("N1", CALL, []));
+  const keep = mu({ irHash: unit.hash, nodes: ["N1"], assetHash: unitStateHash(snapshot, ["N1"]), stageSyncedAt: "T1" });
+  const manifest = { ...manifestOf(keep), variables: [{ name: "Cum", type: "array:double" }] } as unknown as Manifest;
+  const r = planBuild(withFields(["Cum", "array:double"]), {
+    manifests: new Map([[asset, manifest]]),
+    snapshots: new Map([[asset, snapshot]]),
+    stage,
+    handMadeUnits: new Map(),
+    snapshotVariables: new Map([[asset, ["Cum", "abfc_UpdateTarget_t0", "abfc_UpdateTarget_i0"]]]),
+    snapshotVariableTypes: new Map([[asset, new Map([["Cum", "array:real"]])]]),
+  });
+  assert.deepEqual(r.diagnostics, []);
+  assert.deepEqual(r.plan.assets, [], "nothing to do: the variable already has the type");
+});
+
 test("an own field removed from the TS is removed from the asset (ABFC5011 warning); one the asset lacks is only forgotten", () => {
   const r = fieldPlan(ir, fieldManifest(["Gone", "int"]), ["Gone"]);
   assert.deepEqual(r.diagnostics.map((d) => [d.code, d.severity]), [["ABFC5011", "warning"]]);

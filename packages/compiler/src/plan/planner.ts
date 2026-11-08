@@ -1,5 +1,5 @@
 // Build planner: IR + manifests + stage snapshots -> the units to (re)apply, and the diagnostics that block others.
-import { classDefaultsHash, structFieldsHash, t3dNodeKey, t3dNodeName } from "@abfc/ir";
+import { classDefaultsHash, sameBpType, structFieldsHash, t3dNodeKey, t3dNodeName } from "@abfc/ir";
 import type { ApplyPlan, AssetPlan, Diagnostic, IrModule, IrUnit, IrVariable, Span, T3dNode } from "@abfc/ir";
 import { builtGraphMatches, driftDiagnostics, unitState } from "../ownership/drift.js";
 import { analyzeAdoption } from "../ownership/adopt.js";
@@ -267,11 +267,11 @@ export function planBuild(ir: IrModule, input: PlanInput): PlanResult {
     const removeVariables: string[] = [];
     for (const v of fieldVars) {
       const mv = manifest?.variables.find((m) => m.name === v.name);
-      if (mv === undefined || mv.type === v.type) continue;
+      if (mv === undefined || sameBpType(mv.type, v.type)) continue;
       // The variable on the stage already has the TS type: the record is stale, not the field changed (a class this field points at was
       // renamed on the stage, which fixed the variable up, and an earlier build stopped before the manifest followed).
       const onStage = input.snapshotVariableTypes?.get(asset.path)?.get(v.name);
-      if (onStage !== undefined && onStage.toLowerCase() === v.type.toLowerCase()) continue;
+      if (onStage !== undefined && sameBpType(onStage, v.type)) continue;
       retypedFields.add(v.name);
       if (declared.has(v.name)) removeVariables.push(v.name);
       diagnostics.push({
@@ -309,7 +309,7 @@ export function planBuild(ir: IrModule, input: PlanInput): PlanResult {
     const retypedInAsset = new Set<string>();
     for (const v of fieldVars) {
       const onStage = input.snapshotVariableTypes?.get(asset.path)?.get(v.name);
-      if (onStage === undefined || onStage.toLowerCase() === v.type.toLowerCase() || !declared.has(v.name)) continue;
+      if (onStage === undefined || sameBpType(onStage, v.type) || !declared.has(v.name)) continue;
       if (manifest?.variables.find((m) => m.name === v.name)?.type !== v.type) continue;
       retypedInAsset.add(v.name);
       removeVariables.push(v.name);

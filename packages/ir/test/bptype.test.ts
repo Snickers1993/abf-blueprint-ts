@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { BpTypeError, bpTypeFromPin, parseBpType, pinObjectText, validateIrModule, renderT3D } from "../src/index.js";
+import { BpTypeError, bpTypeFromPin, parseBpType, pinObjectText, sameBpType, validateIrModule, renderT3D } from "../src/index.js";
 import type { IrModule, IrNode, Span } from "../src/index.js";
 
 const span: Span = { file: "a.ts", line: 1, col: 1, endLine: 1, endCol: 2 };
@@ -168,4 +168,14 @@ test("renderT3D", () => {
     ].join("\n"),
   );
   assert.match(renderT3D(node("a1"), "N"), /NodeGuid=[0-9A-F]{32}\nEnd Object$/);
+});
+
+test("sameBpType: real and double are one type, float is not, containers and paths must match", () => {
+  assert.equal(sameBpType("array:real", "array:double"), true);
+  assert.equal(sameBpType("double", "real"), true);
+  assert.equal(sameBpType("Int", "int"), true);
+  assert.equal(sameBpType("float", "double"), false);
+  assert.equal(sameBpType("array:double", "double"), false);
+  assert.equal(sameBpType("object:/Game/A.A_C", "object:/Game/B.B_C"), false);
+  assert.equal(sameBpType("not a type!", "int"), false);
 });
