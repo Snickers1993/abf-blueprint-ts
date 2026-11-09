@@ -7,6 +7,8 @@ import type { StageInfo } from "../ownership/drift.js";
 import type { Manifest, ManifestUnit } from "../ownership/manifest.js";
 
 export interface PlanInput {
+  /** Refuse (ABFC5019) instead of replacing hand-made work with an ABFC5014 warning (abf.config.json `protectEditorEdits`). */
+  protectEditorEdits?: boolean;
   manifests: Map<string, Manifest | null>;
   /** Parsed `bp_read` export per asset: node name -> node. */
   snapshots: Map<string, Map<string, T3dNode>>;
@@ -77,6 +79,16 @@ function hasHandMadeEvent(snapshot: Map<string, T3dNode>, name: string, kind: Ir
 function hasFunctionGraph(snapshot: Map<string, T3dNode>, graph: string): boolean {
   for (const n of snapshot.values()) if (n.graph === graph && n.cls.endsWith("K2Node_FunctionEntry") && !isIntermediate(n)) return true;
   return false;
+}
+
+/** Nodes of a function graph other than its entry, result and intermediate nodes (what a hand-made function holds). */
+function functionBodyNodes(snapshot: Map<string, T3dNode>, graph: string): number {
+  let n = 0;
+  for (const x of snapshot.values()) {
+    if (x.graph !== graph || isIntermediate(x) || x.cls.endsWith("K2Node_FunctionEntry") || x.cls.endsWith("K2Node_FunctionResult")) continue;
+    n++;
+  }
+  return n;
 }
 
 /** A call node whose function is `name` of the asset's own class (self context). */
@@ -344,6 +356,14 @@ export function planBuild(ir: IrModule, input: PlanInput): PlanResult {
 
     /** What this build replaces or removes from the asset beyond its own changes (TS wins): reported once as ABFC5014. */
     const report: string[] = [];
+    /** The part of `report` that loses work made in the Mod Editor (`protectEditorEdits` refuses it, ABFC5019). */
+    const losses: string[] = [];
+    const lose = (text: string): void => {
+      report.push(text);
+      losses.push(text);
+    };
+    /** Drift of an owned unit: an edit made in the editor (ABFC5001) is a loss; missing nodes come back, nothing is lost. */
+    const drifted = (d: Diagnostic): void => (d.code === "ABFC5001" ? lose : (t: string) => report.push(t))(`${d.code}: ${d.message}`);
     const abfcEdited = input.editedByAbfc !== undefined && [...input.editedByAbfc].some((p) => p.toLowerCase() === asset.path.toLowerCase());
     const picked: Array<{ unit: IrUnit; removeNodes: string[] }> = [];
     /** Names of events that this build adds (no custom event in the stage yet). */
@@ -357,7 +377,11 @@ export function planBuild(ir: IrModule, input: PlanInput): PlanResult {
       // A function graph is owned whole: whenever it is planned it is recreated (remove_functions + functions), so no node is removed one by one.
       if (unit.kind === "function") {
         if (!mu) {
-          if (hasFunctionGraph(snapshot, unit.graph)) report.push(`${unit.id}: replaced the hand-made function of the same name`);
+          if (hasFunctionGraph(snapshot, unit.graph)) {
+            // an empty hand-made function (an override made only so the build fills it) loses nothing
+            const body = functionBodyNodes(snapshot, unit.graph);
+            (body > 0 ? lose : (t: string) => report.push(t))(`${unit.id}: replaced the hand-made function of the same name${body > 0 ? ` (${plural(body, "node")})` : ""}`);
+          }
           picked.push({ unit, removeNodes: [] });
           continue;
         }
@@ -367,7 +391,7 @@ export function planBuild(ir: IrModule, input: PlanInput): PlanResult {
         }
         const fnDrift = driftDiagnostics(asset.path, [mu], snapshot, input.stage, spans, { severity: "warning" });
         if (fnDrift.length > 0) {
-          if (!abfcEdited) for (const d of fnDrift) report.push(`${d.code}: ${d.message}`);
+          if (!abfcEdited) for (const d of fnDrift) drifted(d);
           picked.push({ unit, removeNodes: [] });
         } else if (state === "pendingAdoption" || state === "staleStage" || mu.irHash !== unit.hash || retypedFields.size > 0 || input.forceReplan?.has(`${asset.path} ${unit.id}`) === true) {
           picked.push({ unit, removeNodes: [] });
@@ -386,7 +410,8 @@ export function planBuild(ir: IrModule, input: PlanInput): PlanResult {
           } catch {
             // no entry node in the snapshot (the name comes from the `_Manual` interface only): nothing to remove
           }
-          report.push(`${unit.id}: replaced the hand-made ${unit.kind === "override" ? "override" : "event"} of the same name${handMadeNodes.length > 0 ? ` (${plural(handMadeNodes.length, "node")})` : ""}`);
+          // the entry node alone (an empty override made only so the build fills it) loses nothing
+          (handMadeNodes.length > 1 ? lose : (t: string) => report.push(t))(`${unit.id}: replaced the hand-made ${unit.kind === "override" ? "override" : "event"} of the same name${handMadeNodes.length > 0 ? ` (${plural(handMadeNodes.length, "node")})` : ""}`);
         }
         if (unit.kind === "event" && !hasHandMadeEvent(snapshot, unit.name)) newEvents.add(unit.name);
         // a manifest unit that was never applied records no tag, but may still have left some
@@ -398,7 +423,7 @@ export function planBuild(ir: IrModule, input: PlanInput): PlanResult {
       // TS wins: an edited, missing-node or changed-adoption unit is replaced, never refused. The report names what was found.
       const drift = driftDiagnostics(asset.path, [mu], snapshot, input.stage, spans, { severity: "warning" });
       if (drift.length > 0) {
-        if (!abfcEdited) for (const d of drift) report.push(`${d.code}: ${d.message}`);
+        if (!abfcEdited) for (const d of drift) drifted(d);
         picked.push({ unit, removeNodes: [...mu.nodes.filter((n) => snapshot.has(n)).map(t3dNodeName), ...(mu.adopt?.nodes ?? []).filter((n) => snapshot.has(n)).map(t3dNodeName), ...tagsOf(snapshot, mu.id, mu.graph)] });
         continue;
       }
@@ -440,7 +465,7 @@ export function planBuild(ir: IrModule, input: PlanInput): PlanResult {
         const drift = driftDiagnostics(asset.path, [mu], snapshot, input.stage, new Map<string, Span>(), { severity: "warning" });
         if (drift.length > 0) {
           // TS wins: the removed unit goes although it was edited or lost nodes; the nodes still on the stage are removed.
-          if (!abfcEdited) for (const d of drift) report.push(`${d.code}: ${d.message}`);
+          if (!abfcEdited) for (const d of drift) drifted(d);
           removeUnits.push({ id: mu.id, graph: mu.graph, nodes: [...mu.nodes.filter((n) => snapshot.has(n)).map(t3dNodeName), ...tagsOf(snapshot, mu.id, mu.graph)] });
         } else forgetUnits.push(mu.id); // adopted hand-made nodes of a stale stage: nothing of abfc's to remove
       }
@@ -556,7 +581,7 @@ export function planBuild(ir: IrModule, input: PlanInput): PlanResult {
         if (tsFunction || inherited || isIntermediate(entry) || delegates.has(graph) || graph === "UserConstructionScript" || removeFunctionSet.has(graph)) continue;
         dropGraphs.add(graph);
         removeFunctionSet.add(graph);
-        report.push(`removed the hand-made function ${graph}`);
+        lose(`removed the hand-made function ${graph}`);
       }
       const byGraph = new Map<string, string[]>();
       for (const n of snapshot.values()) {
@@ -571,7 +596,7 @@ export function planBuild(ir: IrModule, input: PlanInput): PlanResult {
       }
       for (const [graph, nodes] of byGraph) {
         removeGraphNodes.push({ graph, nodes });
-        report.push(`removed ${plural(nodes.length, "hand-made node")} from ${graph} (${nodes.slice(0, 5).join(", ")}${nodes.length > 5 ? ", ..." : ""})`);
+        lose(`removed ${plural(nodes.length, "hand-made node")} from ${graph} (${nodes.slice(0, 5).join(", ")}${nodes.length > 5 ? ", ..." : ""})`);
       }
       const fields = new Set(fieldVars.map((v) => v.name));
       const handMadeVars: string[] = [];
@@ -582,7 +607,7 @@ export function planBuild(ir: IrModule, input: PlanInput): PlanResult {
       }
       if (handMadeVars.length > 0) {
         removeVariables.push(...handMadeVars);
-        report.push(`removed the hand-made ${handMadeVars.length === 1 ? "variable" : "variables"} ${handMadeVars.join(", ")}`);
+        lose(`removed the hand-made ${handMadeVars.length === 1 ? "variable" : "variables"} ${handMadeVars.join(", ")}`);
       }
     }
 
@@ -618,6 +643,16 @@ export function planBuild(ir: IrModule, input: PlanInput): PlanResult {
           ...(asset.director !== undefined ? { director: { asset: asset.director.asset, classPath, ...(asset.director.tag !== undefined ? { tag: asset.director.tag } : {}) } } : {}),
         };
       }
+    }
+    if (input.protectEditorEdits === true && losses.length > 0 && !abfcEdited) {
+      diagnostics.push({
+        severity: "error",
+        code: "ABFC5019",
+        asset: asset.path,
+        message: `${asset.path.slice(asset.path.lastIndexOf("/") + 1)}: this build would replace work made in the Mod Editor (protectEditorEdits is on): ${losses.join("; ")}. Nothing was applied.`,
+        fix: "move the hand-made work into the .ts file (or make the class hybrid with a _Manual interface to keep it), or run abfc build --replace-editor-edits to let TypeScript win this once.",
+      });
+      continue;
     }
     if (report.length > 0) {
       diagnostics.push({

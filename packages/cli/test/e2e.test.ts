@@ -293,7 +293,8 @@ test("(b1q) a stage read that fails after the re-sync does not drop the units of
     writeFileSync(src, readFileSync(src, "utf8").replace("const rowName = Lib.RowToName(pot.Row);", "const rowName = Lib.RowToName(pot.Row); this.LastName = rowName;"), "utf8");
     r.backend.reportMessages = [{ severity: "error", asset: RELAY_ASSET, message: "boom" }];
     r.backend.failReadsAfterResync = true;
-    x = await r.run(["build"]);
+    // --full: no read cache, so the read after the re-sync really goes to the (failing) backend
+    x = await r.run(["build", "--full"]);
     assert.notEqual(x.code, 0, x.out);
     const after = readManifest(r.dir, RELAY_ASSET)!.units;
     assert.equal(after.length, before.length, "the units are not dropped when the stage cannot be read");
@@ -1841,6 +1842,43 @@ test("(A8-2) a hand-made event, variable and function graph on a non-hybrid asse
   });
 });
 
+test("(A8-2p) protectEditorEdits: a build that would remove hand-made work refuses (ABFC5019) and applies nothing; --replace-editor-edits lets it", async () => {
+  await withRig({}, async (r) => {
+    rmSync(join(r.dir, "src", "Relay.ts"));
+    rmSync(join(r.dir, "src", "Relay.test.ts"));
+    writeFileSync(join(r.dir, "src", "Tally.ts"), TALLY, "utf8");
+    const cfgFile = join(r.dir, "abf.config.json");
+    writeFileSync(cfgFile, JSON.stringify({ ...JSON.parse(readFileSync(cfgFile, "utf8")), protectEditorEdits: true }), "utf8");
+    let x = await r.run(["build"]);
+    assert.equal(x.code, 0, x.out);
+
+    const handNodes = r.backend.addHandMadeEvent(TALLY_ASSET, "MyOwnEvent");
+    r.backend.addHandMadeVariable(TALLY_ASSET, "Mine", "int");
+    r.backend.addHandMadeFunction(TALLY_ASSET, "HandFn");
+    const before = appliedSpecs(r).length;
+
+    x = await r.run(["build", "--drift"]);
+    assert.equal(x.code, 1, x.out);
+    assert.match(x.out, /error ABFC5019/);
+    assert.match(x.out, /HandFn/);
+    assert.match(x.out, /Mine/);
+    assert.equal(appliedSpecs(r).length, before, "nothing was applied");
+    const held = r.backend.nodeNames(TALLY_ASSET);
+    for (const n of handNodes) assert.ok(held.includes(n), `${n} is still on the stage`);
+    assert.deepEqual(r.backend.functionNames(TALLY_ASSET), ["HandFn"]);
+
+    // one build may replace it (TypeScript wins, the old ABFC5014 warning)
+    x = await r.run(["build", "--drift", "--replace-editor-edits"]);
+    assert.equal(x.code, 0, x.out);
+    assert.match(x.out, /warning ABFC5014/);
+    assert.deepEqual(r.backend.functionNames(TALLY_ASSET), []);
+
+    // nothing left to protect: a plain build passes again
+    x = await r.run(["build", "--drift"]);
+    assert.equal(x.code, 0, x.out);
+  });
+});
+
 test("(R1) components, the widget tree and timeline templates in the stage export are not graphs: the sweep never lists them, only the hand-made event goes", async () => {
   await withRig({}, async (r) => {
     rmSync(join(r.dir, "src", "Relay.ts"));
@@ -2838,4 +2876,39 @@ test("(s7) the backend cannot start at the start of a build: ABFC3020 once with 
     assert.match(x.out, /ABFC2000/, "the build went on to the frontend");
     assert.doesNotMatch(x.out, /ABFC3003|ABFC3001/, "the existing stubs are usable");
   });
+});
+
+test("(h2) test options and waitUntil: map and timeout reach bp_game_test; without game_test_until the wait degrades with ABFC6106", async () => {
+  const body = [
+    'import { test } from "@abfc/testkit";',
+    'import { BP_Relay } from "./Relay.js";',
+    "",
+    'test("relay settles", { map: "/Game/Maps/Facility", timeout: 400 }, (t) => {',
+    "  const a = t.find(BP_Relay, { timeout: 60 });",
+    "  const b = t.spawn(BP_Relay);",
+    "  a.moveTo(0, 0, 100);",
+    '  b.call("UpdateTarget");',
+    '  t.waitUntil(b.get("Visible"), { timeout: 4 }).equals(false);',
+    "  t.expect(t.distance(a, b)).below(5000);",
+    '  t.note("where", t.distance(a, b));',
+    "});",
+    "",
+  ].join("\n");
+  for (const until of [false, true]) {
+    await withRig(until ? { handMadeEvent: false, extraFeatures: ["game_test_until"] } : { handMadeEvent: false }, async (r) => {
+      assert.equal((await r.run(["build"])).code, 0);
+      rmSync(join(r.dir, "src", "Relay.test.ts"));
+      writeFileSync(join(r.dir, "src", "Settle.test.ts"), body, "utf8");
+      const x = await r.run(["test", "--no-build"]);
+      assert.equal(x.code, 0, x.out);
+      assert.match(x.out, /PASS relay settles \(8\/8/);
+      assert.match(x.out, /note src\/Settle\.test\.ts:11 where: null/);
+      assert.equal(/warning ABFC6106/.test(x.out), !until, x.out);
+      assert.equal(r.backend.gameTestRuns.length, 1);
+      const run = r.backend.gameTestRuns[0]!;
+      assert.deepEqual(run.o, { timeoutSeconds: 400, map: "/Game/Maps/Facility" });
+      const ops = run.steps.map((s) => (s as { op: string }).op);
+      assert.deepEqual(ops, until ? ["find", "spawn", "python", "call", "until", "python", "assert", "python"] : ["find", "spawn", "python", "call", "wait", "get", "assert", "python", "python", "python"]);
+    });
+  }
 });

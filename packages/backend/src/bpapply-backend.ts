@@ -408,12 +408,12 @@ export class BpApplyBackend implements Backend {
     return { run: str(json.run) ?? "", seconds: num(json.seconds), file, data, warm: this.lastWarm };
   }
 
-  async gameTest(mod: string, steps: unknown[], o: { timeoutSeconds: number }): Promise<GameTestReport> {
+  async gameTest(mod: string, steps: unknown[], o: { timeoutSeconds: number; map?: string }): Promise<GameTestReport> {
     this.warmStarted = false; // the game test runs cold and stops a running warm session first
     this.lastWarm = false;
     const { json } = await this.call(
       "bp_game_test",
-      { mod, steps, timeout_seconds: o.timeoutSeconds },
+      o.map === undefined ? { mod, steps, timeout_seconds: o.timeoutSeconds } : { mod, steps, timeout_seconds: o.timeoutSeconds, map: o.map },
       { tolerate: (j) => Array.isArray(j.steps) },
     );
     const stepList = Array.isArray(json.steps) ? json.steps : [];

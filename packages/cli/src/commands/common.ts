@@ -14,6 +14,7 @@ import { SLOW_BACKEND_HINT } from "../progress.js";
 import { backendInfoDiagnostics } from "./backend-version.js";
 import { formatTimings, recordRun } from "../runs.js";
 import type { RunEntry } from "../runs.js";
+import type { ReadCache } from "../readcache.js";
 
 /**
  * A codegen epoch, not the release version: it is stored in units.json, and a change marks every unit for forceReplan
@@ -182,10 +183,34 @@ export function missingInStage(ctx: CliContext, stagingPath: string, assets: str
   return out;
 }
 
-/** `bp_read` of an asset and the parsed export. */
+/** The read cache a command switched on for its stage ({@link useReadCache}); absent = every read goes to the backend. */
+const readCaches = new WeakMap<CliContext, ReadCache>();
+
+/** Serves {@link readAsset} from `cache` (null switches it off) for the rest of this command. */
+export function useReadCache(ctx: CliContext, cache: ReadCache | null): void {
+  if (cache === null) readCaches.delete(ctx);
+  else readCaches.set(ctx, cache);
+}
+
+/** The read cache in use, if any (for the build's summary). */
+export function readCacheOf(ctx: CliContext): ReadCache | undefined {
+  return readCaches.get(ctx);
+}
+
+/**
+ * `bp_read` of an asset and the parsed export. With a read cache in use, an asset whose stage files (and the mod packages its export
+ * references) are byte-identical to an earlier read is served from the cache instead of the editor.
+ */
 export async function readAsset(ctx: CliContext, backend: Backend, asset: string): Promise<{ text: string; parsed: T3dExport }> {
+  const cache = readCaches.get(ctx);
+  const key = cache?.key(asset) ?? null;
+  if (cache !== undefined && key !== null) {
+    const hit = cache.get(key);
+    if (hit !== null) return { text: hit, parsed: parseExport(hit) };
+  }
   const snap = await backend.read(ctx.config.mod.name, asset);
   const text = ctx.deps.host.readFile(snap.exportPath);
+  if (cache !== undefined && key !== null) cache.put(key, text);
   return { text, parsed: parseExport(text) };
 }
 

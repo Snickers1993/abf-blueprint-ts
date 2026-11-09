@@ -691,22 +691,23 @@ export class UnitBuilder {
 
   // ---- conditions ----
 
-  private cond(e: HirExpr, from: Exit[]): { t: Exit[]; f: Exit[] } {
+  /** `negated`: under a `!` (or inside the operand of one), where `isValid(castResult)` keeps its old shape (see the isValid case). */
+  private cond(e: HirExpr, from: Exit[], negated = false): { t: Exit[]; f: Exit[] } {
     const P = this.profile.pins;
     this.cur = from;
     switch (e.k) {
       case "and": {
-        const a = this.cond(e.a, from);
-        const b = this.cond(e.b, a.t);
+        const a = this.cond(e.a, from, negated);
+        const b = this.cond(e.b, a.t, negated);
         return { t: b.t, f: [...a.f, ...b.f] };
       }
       case "or": {
-        const a = this.cond(e.a, from);
-        const b = this.cond(e.b, a.f);
+        const a = this.cond(e.a, from, negated);
+        const b = this.cond(e.b, a.f, negated);
         return { t: [...a.t, ...b.t], f: b.f };
       }
       case "not": {
-        const r = this.cond(e.e, from);
+        const r = this.cond(e.e, from, !negated);
         return { t: r.f, f: r.t };
       }
       case "local": {
@@ -727,6 +728,14 @@ export class UnitBuilder {
         return e.negate ? { t: f, f: t } : { t, f };
       }
       case "isValid": {
+        // `isValid(x)` on a cast result right after the cast: the failed cast is the false side (as for `if (x)`), so the else path
+        // runs when the cast fails. Without this the Cast Failed pin stayed unwired and a failed cast silently ended the unit.
+        // `!isValid(x)` keeps its old graph (a failed cast still ends the unit): in the usual `if (!isValid(x)) return;` that is the
+        // same behaviour, and published Blueprints built from it must not change; the frontend warns (ABFC2089) when it is not.
+        if (e.value.k === "local" && !negated) {
+          const l = this.local(e.value.id);
+          if (l.pendingNull !== undefined) return this.cond(e.value, from);
+        }
         const v = this.value(e.value);
         const br = this.branch(this.isValidCall(v.pin, e.span), undefined, e.span);
         return { t: [`${br}.${P.then}`], f: [...v.nulls, `${br}.${P.else}`] };

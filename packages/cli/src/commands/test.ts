@@ -1,6 +1,6 @@
 import { compileTests, loadProgram } from "@abfc/compiler";
 import type { TestCase } from "@abfc/ir";
-import { evaluateTest, toGameTestSteps } from "@abfc/testkit/runner";
+import { GAME_TEST_UNTIL, evaluateTest, foldReport, planGameTest } from "@abfc/testkit/runner";
 import type { CliContext } from "../context.js";
 import { SLOW_BACKEND_HINT } from "../progress.js";
 import { BackendSession, Recorder, compilerConfigOf, emitAll, lockDiagnostics, since } from "./common.js";
@@ -61,15 +61,26 @@ export async function runTestsWithSummary(
     return { ok: true, passed: 0, total: 0 };
   }
 
-  const { backend } = await session.open("test.backendStart");
+  const { backend, info } = await session.open("test.backendStart");
+  const degraded = cases.filter((c) => planGameTest(c, info.extensions).degraded.length > 0);
+  if (degraded.length > 0) {
+    output.diag({
+      severity: "warning",
+      code: "ABFC6106",
+      message: `the backend has no ${GAME_TEST_UNTIL}: t.waitUntil waits its whole timeout and looks once (${degraded.map((c) => c.name).join(", ")}).`,
+    });
+  }
   let failed = 0;
   const results: Array<{ name: string; passed: boolean; ok: number; steps: number; seconds: number }> = [];
   for (const [i, tc] of cases.entries()) {
     const t0 = performance.now();
     const step = ctx.progress.start(`Running ${tc.name} (${i + 1}/${cases.length})`, { slowHint: SLOW_BACKEND_HINT });
+    const plan = planGameTest(tc, info.extensions);
     let report;
     try {
-      report = await backend.gameTest(mod, toGameTestSteps(tc), { timeoutSeconds: 180 });
+      const o: { timeoutSeconds: number; map?: string } = { timeoutSeconds: tc.timeoutSeconds ?? 180 };
+      if (tc.map !== undefined) o.map = tc.map;
+      report = foldReport(await backend.gameTest(mod, plan.steps, o), plan);
     } catch (e) {
       step.fail();
       throw e;
@@ -78,6 +89,12 @@ export async function runTestsWithSummary(
     const ev = evaluateTest(tc, report);
     rec.record(`test.${tc.name}`, since(t0), ev.passed, tc.steps.length);
     output.info(`${ev.passed ? "PASS" : "FAIL"} ${tc.name} (${ev.summary.ok}/${tc.steps.length}, ${report.seconds.toFixed(1)} s)`, ev.passed ? "ok" : "fail");
+    for (const [k, rec] of tc.steps.entries()) {
+      if (rec.note === undefined) continue;
+      const got = report.steps.find((s) => s.i === k);
+      const shown = got === undefined ? "(not reached)" : got.error !== undefined ? `error: ${got.error}` : JSON.stringify(got.value) ?? String(got.value);
+      output.info(`  note ${tc.file}:${rec.span.line} ${rec.note}: ${shown}`);
+    }
     for (const d of ev.diagnostics) output.diag(d);
     if (!ev.passed) failed++;
     results.push({ name: tc.name, passed: ev.passed, ok: ev.summary.ok, steps: tc.steps.length, seconds: report.seconds });

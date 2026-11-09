@@ -216,6 +216,16 @@ function consumesCast(next: HirStmt, id: LocalId): boolean {
   return directExprs(next).some((e) => some(e, (x) => x.k === "optional" && isLocal(x.value)));
 }
 
+/** `if (!isValid(<id>))`: a failed cast does not reach its branch (kept for the published Blueprints built that way). */
+function negatedIsValidOf(next: HirStmt, id: LocalId): boolean {
+  return next.k === "if" && next.cond.k === "not" && next.cond.e.k === "isValid" && next.cond.e.value.k === "local" && next.cond.e.value.id === id;
+}
+
+/** An if whose branch is only `return;` (and no else): ending the unit on a failed cast does the same. */
+function bareReturn(next: HirStmt): boolean {
+  return next.k === "if" && next.then.length === 1 && next.then[0]!.k === "return" && next.then[0]!.value === undefined && next.then[0]!.outs === undefined && next.else.length === 0;
+}
+
 function consumesExec(next: HirStmt, id: LocalId): boolean {
   return next.k === "if" && some(next.cond, (x) => x.k === "execIs" && x.local === id);
 }
@@ -1056,6 +1066,13 @@ class HirBuilder {
       if (init.k === "cast") {
         const ok = next === undefined ? false : next.hir === undefined || consumesCast(next.hir, id);
         if (!ok) this.sink.error("ABFC2050", `cast result "${it.hir.name}" must be consumed by the next statement (if (!${it.hir.name}), if (${it.hir.name}) or ${it.hir.name}?.)`, it.node);
+        else if (next?.hir !== undefined && negatedIsValidOf(next.hir, id) && !bareReturn(next.hir)) {
+          this.sink.warning(
+            "ABFC2103",
+            `if (!isValid(${it.hir.name})) right after the cast: when the cast fails, the event ends here instead of running this branch. Write if (!${it.hir.name}) to run it when the cast fails.`,
+            next.node,
+          );
+        }
       } else if (init.k === "call" && init.execOutputs !== null) {
         const ok = next === undefined ? false : next.hir === undefined || consumesExec(next.hir, id);
         if (!ok) this.sink.error("ABFC2052", `exec result "${it.hir.name}" must be branched by the next statement (if (${it.hir.name}.exec === "...") )`, it.node);

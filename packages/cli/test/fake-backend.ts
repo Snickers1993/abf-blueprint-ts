@@ -117,6 +117,13 @@ export interface RecordedCall {
 export interface FakeBackendOptions {
   /** The backend lists `backend_info` in the shape of the wildcard-pins branch (default false: an older backend without it). */
   backendInfo?: boolean;
+  /**
+   * Like a backend without backend-override-blueprint-events.patch: an `override` of an event declared in a Blueprint class (not
+   * /Script/) comes out as a custom event named `<function>_1`, as Unreal turns an event the Actor template scratch cannot resolve.
+   */
+  overrideAsCustomEvent?: boolean;
+  /** Extra `abfc_extensions` features, e.g. "game_test_until". */
+  extraFeatures?: string[];
   /** The initial asset holds a hand-made `UpdateTarget` event (default true). */
   handMadeEvent?: boolean;
   /** `staging_sync` with discardChanges (a resync) fails; the first sync of a missing stage still works (default false). */
@@ -387,6 +394,8 @@ export class FakeBackend implements Backend {
   /** Per `bp_game_test` call (in order, counted from `gameTestCalls`): the step indexes that fail. */
   gameTestFailures: number[][] = [];
   gameTestCalls = 0;
+  /** What each `bp_game_test` call sent. */
+  gameTestRuns: Array<{ steps: unknown[]; o: { timeoutSeconds: number; map?: string } }> = [];
   auditOk = true;
   /** A rename or reparent edits the nodes of the asset it renames/reparents (a pin default changes), as Unreal's fixup does (default false). */
   opsEditNodes = false;
@@ -493,7 +502,7 @@ export class FakeBackend implements Backend {
       headlessDir: withInfo ? "C:\\abfc-headless" : null,
       documentsDir: withInfo ? "C:\\Users\\Jane\\Documents" : null,
       headlessDirHasSpace: false,
-      extensions: EXT_FEATURES,
+      extensions: [...EXT_FEATURES, ...(this.options.extraFeatures ?? [])],
       capabilities,
     };
   }
@@ -716,6 +725,8 @@ export class FakeBackend implements Backend {
   async stageStatus(mod: string): Promise<StageStatus | null> {
     this.calls.push({ tool: "staging_status" });
     if (!this.staged || mod !== "TestMod") return null; // the only mod of the fake machine
+    // Tests edit the fake stage in memory between commands (as the editor would on disk): the files follow.
+    this.mirrorFiles();
     return {
       mod,
       stagingPath: join(this.root, "stage"),
@@ -899,10 +910,12 @@ export class FakeBackend implements Backend {
   private mirrorFiles(): void {
     const content = join(this.root, "stage", "Content");
     rmSync(content, { recursive: true, force: true });
+    // The file holds what a read returns, so a changed asset has changed bytes (abfc's read cache keys on them).
     for (const path of [...this.assets.keys(), ...this.rowClasses.keys()]) {
       const file = join(content, ...path.split("/").slice(2)) + ".uasset";
       mkdirSync(dirname(file), { recursive: true });
-      writeFileSync(file, "", "utf8");
+      const a = this.assets.get(path);
+      writeFileSync(file, a !== undefined ? renderAsset(a) : `row ${this.rowClasses.get(path) ?? ""}`, "utf8");
     }
   }
 
@@ -948,8 +961,9 @@ export class FakeBackend implements Backend {
     return { run: join(this.root, "runs", "catalog"), seconds: 0.1, file: "", data: this.options.catalog };
   }
 
-  async gameTest(_mod: string, steps: unknown[], _o: { timeoutSeconds: number }): Promise<GameTestReport> {
+  async gameTest(_mod: string, steps: unknown[], o: { timeoutSeconds: number; map?: string }): Promise<GameTestReport> {
     this.calls.push({ tool: "bp_game_test" });
+    this.gameTestRuns.push({ steps, o });
     this.lastWarm = false; // the game test always runs cold
     const failing = new Set(this.gameTestFailures[this.gameTestCalls++] ?? []);
     const report = steps.map((s, i) => {
@@ -1129,6 +1143,8 @@ export class FakeBackend implements Backend {
       head.push(`FunctionReference=(${s.class ? `MemberParent="${s.class}",` : ""}MemberName="${s.function ?? ""}")`);
     } else if (s.k === "get" || s.k === "set") {
       head.push(`VariableReference=(${s.class ? `MemberParent="${s.class}",` : ""}MemberName="${s.name ?? ""}")`);
+    } else if (s.k === "override" && this.options.overrideAsCustomEvent === true && !(s.class ?? "").startsWith("/Script/")) {
+      head.push(`CustomFunctionName="${s.function ?? ""}_1"`);
     } else if (s.k === "override") {
       head.push(`EventReference=(MemberParent="/Script/CoreUObject.Class'${s.class ?? ""}'",MemberName="${s.function ?? ""}")`, "bOverrideFunction=True");
     } else if (s.k === "event") {

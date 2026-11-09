@@ -871,6 +871,16 @@ Fix: write the value as a plain string literal.
 
 The stubs are the `.d.ts` files `abfc generate` writes from the Mod Editor; the lock file next to them records which editor build and configuration they belong to. These codes mean the stubs are missing, out of date or incomplete. They all exit with 2.
 
+### ABFC2103
+
+Severity: warning · Exit: -
+
+Meaning: `if (!isValid(x))` comes right after `const x = cast(...)`, and its branch does more than `return;`. When the cast fails, the unit ends at the cast; the branch does not run (only a valid object of the wrong class reaches it). `if (!isValid(x)) return;` is not reported: ending the unit does the same thing.
+
+Typical cause: a log line, a counter or a fallback inside `if (!isValid(x)) { ... }` after a cast.
+
+Fix: write `if (!x) { ... }`, which runs the branch when the cast fails. `if (isValid(x)) { ... } else { ... }` runs the else side for a failed cast too.
+
 ### ABFC3001
 
 Severity: error in `abfc build` and `abfc publish`, warning in `abfc check` · Exit: 2 (error), - (warning). The generator-version variant is always a warning.
@@ -1373,6 +1383,16 @@ Typical cause: you renamed or removed the struct, as ABFC2046 suggests for a fie
 
 Fix: delete the struct in the Mod Editor once no Blueprint uses it, or declare it in TypeScript again (nothing else is needed; if you remove it again later, abfc warns again).
 
+### ABFC5019
+
+Severity: error · Exit: 1
+
+Meaning: `protectEditorEdits` is on in abf.config.json and this build would remove or replace work made in the Mod Editor: hand-made nodes, function graphs or variables of a class without a `_Manual` interface merge, a hand-made event or function with a body that has the name of a TypeScript unit, or an edit of nodes abfc built (ABFC5001). The message lists it. Nothing is applied. An empty hand-made override (made only so the build fills it) is not protected.
+
+Typical cause: the Blueprint was changed in the Mod Editor after it was built from TypeScript.
+
+Fix: move the work into the `.ts` file, or keep it by making the class hybrid (`interface X extends X_Manual {}`). To let TypeScript win once, run `abfc build --replace-editor-edits` (the old behaviour: [ABFC5014](#abfc5014) lists what went).
+
 ### ABFC5101
 
 Severity: warning · Exit: -
@@ -1395,7 +1415,7 @@ Fix: run `abfc build` again. The pass is repeated.
 
 ## 6xxx tests
 
-Codes 6001 and 6002 are Unreal compile errors reported after a build applied the Blueprints. 6101-6201 come from `abfc test` and from the test gate of `abfc publish`. They exit with 1 when they are errors. Writing tests is covered in [first-mod.md](first-mod.md).
+Codes 6001 and 6002 are Unreal compile errors reported after a build applied the Blueprints; 6003 is an override that the apply turned into a custom event. 6101-6201 come from `abfc test` and from the test gate of `abfc publish`. They exit with 1 when they are errors. Writing tests is covered in [first-mod.md](first-mod.md).
 
 ### ABFC6001
 
@@ -1416,6 +1436,16 @@ Meaning: Unreal reported a compile error that abfc could not map to a TypeScript
 Typical cause: an error in a node abfc does not own, or a message without a node.
 
 Fix: read the message. For a hand-made node, fix it in the Mod Editor. After a failed compile abfc re-syncs the stage from the mod, so the next build applies your units again; `--keep-failed-stage` keeps the failed stage instead.
+
+### ABFC6003
+
+Severity: error · Exit: 1
+
+Meaning: an `@override` did not come out of the apply as an override event. Unreal made it a custom event named like the parent's function (for example `GunStartFiring_1`), which compiles clean but is never called, so the parent's implementation keeps running. The build fails and the stage is re-synced, so the stray event is never published.
+
+Typical cause: the event is declared in a Blueprint class (a game weapon's `GunStartFiring`), not in native code, and the backend built the node's template in its Actor scratch Blueprint, where the event does not exist. Native events (`ReceiveBeginPlay`, `ReceiveTick`) are not affected.
+
+Fix: apply `backend-override-blueprint-events.patch` to abf-mod-editor-mcp (it templates such an event in a scratch child of the class that declares it), restart the backend and build again. Until then, hand-make the override in the Mod Editor and call a custom `@event` from it.
 
 ### ABFC6101
 
@@ -1466,6 +1496,16 @@ Meaning: a `liveHud` test is skipped, because it needs a live HUD and cannot run
 Typical cause: the test was written with `test.liveHud`.
 
 Fix: nothing is required. abfc lists the test and its checklist in `.abfc/reports/manual-checks.md` for a manual check in Play In Editor. Skipped live tests do not stop `abfc publish`.
+
+### ABFC6106
+
+Severity: warning · Exit: -
+
+Meaning: the backend runs no `until` steps, so `t.waitUntil(...)` waits its whole timeout and then looks once.
+
+Typical cause: the backend lacks the `game_test_until` extension (backend patch `backend-game-test-until.patch`).
+
+Fix: nothing is required: the test still passes when the condition holds at the end of the timeout. A condition that holds only for a moment (a flag that is set and cleared again) needs the patch; apply it and restart the backend.
 
 ### ABFC6201
 

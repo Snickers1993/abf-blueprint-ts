@@ -84,7 +84,7 @@ Prints the project, the mod, the profile, the Node version, the install kind, th
 ## abfc generate
 
 ```
-abfc generate [--add <path>]... [--refresh] [--resync]
+abfc generate [--add <path>]... [--refresh] [--resync] [--full]
 ```
 
 `abfc stubs` is the old name of this command. It still works and does the same, prints a deprecation warning on standard error, and is no longer listed in the usage text.
@@ -96,6 +96,9 @@ Generates the stubs automatically. The backend lists the names of the whole game
 | `--add <path>` | Generate stubs for one more name; repeat it for several. A path is `/Script/<Package>.<Name>` (a class, struct or enum), a `/Game/...` class path (`/Game/Dir/BP_X.BP_X_C`) or a `/Game/...` module (every class of that Blueprint file). Added names are remembered in `stubs.lock.json` and kept by later runs. A name that is not in the catalog gives [ABFC3022](errors.md#abfc3022); a name that failed to reflect earlier is retried. |
 | `--refresh` | Forget the cached catalog and the cached reflection and generate everything again (the 3-4 minute full run). Use it after a game update that does not change the editor build, or to retry the classes recorded as failed ([ABFC3023](errors.md#abfc3023)). |
 | `--resync` | When mod assets are read, first recreate the staging copy from the mod (see [`abfc build`](#abfc-build)). |
+| `--full` | Read every hand-made mod asset from the editor again, also the ones that are unchanged. |
+
+Hand-made mod assets are read only when they are new or changed: `.abfc/stubs/<profile>/_modreads.json` keeps, for each asset, the hash of its files in the staging copy and of what abfc owns in it at its last read, and an asset whose hashes are the same keeps its stub without an editor read (about 15 s each). A new hand-made Blueprint (list it in `stubs.modAssets`, or use `"all"`) costs one read. The first run after an update of abfc reads every asset once.
 
 `generate --json` result: `{dir, files, members, opaque, modAssets, full, reflected, catalog, added, failed, notFound, used}` (`dir` is the profile folder; `files` and `members` count what was written; `opaque` lists types abfc could not describe; `modAssets` lists the hand-made mod assets that got stubs; `full` is true when the full game set was generated; `reflected` is the number of classes sent to the backend in this run; `catalog` is `{game, scriptClasses}` counts or null without a catalog; `added`, `failed` and `notFound` are the lists described above; `used` lists the placeholder types the source used that this run generated).
 
@@ -120,12 +123,14 @@ Type-checks the project, applies the subset rules, lowers every class to Bluepri
 ## abfc build
 
 ```
-abfc build [--resync] [--drift] [--keep-failed-stage]
+abfc build [--resync] [--drift] [--full] [--keep-failed-stage] [--replace-editor-edits]
 ```
 
 Compiles the project and applies only the units whose TypeScript changed to a private staging copy of the mod, then compiles the changed Blueprints in Unreal. Your mod is not changed; `abfc publish` copies the result. The first build creates the staging copy. A build that finds nothing to do prints "up to date".
 
-TypeScript wins: a build makes each Blueprint it applies match the `.ts` file. What was changed in the Mod Editor is replaced, and one [ABFC5014](errors.md#abfc5014) warning per asset lists it; in a class without a `_Manual` interface merge the hand-made nodes, function graphs and variables are removed too. The build never refuses because of editor edits. A plain build reads only the assets whose TypeScript changed (use `--drift` for all).
+TypeScript wins: a build makes each Blueprint it applies match the `.ts` file. What was changed in the Mod Editor is replaced, and one [ABFC5014](errors.md#abfc5014) warning per asset lists it; in a class without a `_Manual` interface merge the hand-made nodes, function graphs and variables are removed too. The build never refuses because of editor edits, unless `"protectEditorEdits": true` is set in abf.config.json: then a build that would remove or replace hand-made work stops with [ABFC5019](errors.md#abfc5019) and applies nothing, and `abfc build --replace-editor-edits` lets one build replace it. A plain build reads only the assets whose TypeScript changed (use `--drift` for all).
+
+Read cache: every read of an owned asset is kept in `.abfc/cache/reads`, keyed by the bytes of the asset's files in the staging copy and of the mod files its export references. When the staging copy is copied from the mod again (the Mod Editor saved any file of the mod, a failed compile, `--resync`), a build has to look at every owned asset; with the cache only the assets whose files, or the files they reference, changed are read from the editor. `--full` turns the cache off and reads every owned asset from the editor (as `--drift` does); `abfc publish --full` never uses the cache either.
 
 With backend 2.6.0 the build also does the following without a flag, one output line each:
 
@@ -163,6 +168,26 @@ Builds (unless `--no-build`), compiles the tests of the project and runs each on
 | --- | --- |
 | `[pattern]` | Run only the tests that match. |
 | `--no-build` | Skip the build; the stubs lock is still checked. |
+
+### Tests in a real map
+
+`test(name, { map, timeout }, body)` runs one test on a game map instead of the empty default (which has no player), with a longer run timeout for the map load. The run uses the backend's own user folder, so no save of yours is read or written. What a test can do:
+
+| In a test | Step |
+| --- | --- |
+| `t.spawn(Class)` | spawns an actor (at the origin) |
+| `t.find(Class, { timeout })` | the first actor of exactly that class in a level, waited for (the player: `t.find(Abiotic_PlayerCharacter_C)`); actor templates inside Blueprint classes are not matched |
+| `h.call("Fn", ...)`, `h.get("Var")`, `h.set("Var", v)` | calls a function or event, reads or writes a variable |
+| `h.moveTo(x, y, z)`, `h.moveTo(other)`, `h.aim(pitch, yaw)` | teleports an actor; turns it and its controller's view (the player's camera follows) |
+| `t.distance(a, b)` | the distance between two actors (cm) |
+| `t.wait(s)`, `t.python(code)` | waits; runs Python in the game (`ctx[name]` holds the values, `result` is the value) |
+| `t.note("label", v)` | prints `v` (a variable or an inline `h.get`, `h.call`, `t.distance`, `t.python`) in the output as `note <file>:<line> label: <value>`, pass or fail; a note never fails the test |
+| `t.expect(v).equals / approx / contains / truthy / notNone / below / above` | checks a value once |
+| `t.waitUntil(v, { timeout, every }).equals(...)` | looks at an inline `h.get`, `h.call`, `t.distance` or `t.python` again and again until the check holds; fails after `timeout` (default 10 s) |
+
+A top-level `const NAME = "..."` (or a backtick string without `${}`) of a test file can stand wherever a test takes text, such as `t.python(NAME)`. Read state back (a `Step` variable, a flag) instead of PrintString, which is compiled out of the game build.
+
+`t.waitUntil` polls on a backend with the `game_test_until` extension (backend patch `docs/backend-patches/backend-game-test-until.patch`, which also lets a big map take most of the timeout to load). On an older backend it waits the whole timeout, then looks once, with warning [ABFC6106](errors.md#abfc6106).
 
 `test --json` result: `{tests: [{name, passed, ok, steps, seconds}], manualChecks?}`; each manual check is `{name, file, line, checklist}`. When the build ran and was up to date or applied, the test result replaces the build result in the document. A failed test is [ABFC6104](errors.md#abfc6104) (exit 1).
 
