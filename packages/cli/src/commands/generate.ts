@@ -1,4 +1,5 @@
-import { mkdirSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { win32 } from "node:path";
 import type { Backend, ReflectData } from "@abfc/backend";
@@ -40,6 +41,7 @@ import { reflectAll } from "../reflectchunks.js";
 import { recordRun } from "../runs.js";
 import { backendIdOf, resolveStubRequest, shortName, stubsNeedWork, usedPlaceholdersToGenerate } from "../stubsauto.js";
 import type { StubMode } from "../stubsauto.js";
+import { stagePackageHash } from "../readcache.js";
 import { refreshTagsFile } from "../tags.js";
 import { BackendSession, Recorder, backendStartOptions, pruneManifestsToStage, since } from "./common.js";
 import { ensureStage } from "./stage.js";
@@ -111,6 +113,33 @@ function merge(into: ReflectData, add: ReflectData): void {
   into.errors.push(...add.errors);
 }
 
+/**
+ * `_modreads.json` in the profile folder: for each mod asset of the stub cache, the hash of its stage files and of what abfc owns
+ * in it when it was last read. `abfc generate` reads again only the assets whose entry differs (a new asset, a Mod Editor save,
+ * a build that changed what abfc owns); the rest keep their entry of the stub cache.
+ */
+const MOD_READS_FILE = "_modreads.json";
+const MOD_READS_VERSION = 1;
+interface ModReads {
+  version: number;
+  /** The stub cache the entries belong to: generator and editor build. */
+  identity: string;
+  assets: Record<string, { files: string; owned: string; skipped?: true }>;
+}
+
+function readModReads(profileDir: string, identity: string): ModReads["assets"] {
+  try {
+    const r = JSON.parse(readFileSync(win32.join(profileDir, MOD_READS_FILE), "utf8")) as ModReads;
+    if (r.version === MOD_READS_VERSION && r.identity === identity && typeof r.assets === "object" && r.assets !== null) return r.assets;
+  } catch {
+    // missing or damaged: every asset is read
+  }
+  return {};
+}
+
+const ownedHash = (o: { units: string[]; variables: string[] } | undefined): string =>
+  createHash("sha256").update(JSON.stringify(o ?? { units: [], variables: [] })).digest("hex");
+
 /** What one `abfc generate` run reflects and writes (decided by {@link generateStubs}). */
 interface StubRun {
   mode: StubMode;
@@ -120,6 +149,10 @@ interface StubRun {
   seed: StubCache | null;
   /** Read the mod's own assets (explicit runs and runs without a cache); otherwise they come from the seed. */
   readModAssets: boolean;
+  /** Read every mod asset, even one whose stage files are unchanged since its entry in the seed was made (`--full`). */
+  readAllModAssets: boolean;
+  /** The staging copy (empty when unknown: every asset is read). */
+  stagingPath: string;
   classes: string[];
   structs: string[];
   /** The /Game entries of `classes`. */
@@ -172,23 +205,48 @@ async function reflectAndRead(ctx: CliContext, backend: Backend, run: StubRun): 
   const manual: ManualAsset[] = [];
   const owned = ownedSets(ctx.projectDir);
   const t0 = clock();
+  const readsIdentity = `${STUBGEN_VERSION}|${env.fingerprint ?? ""}`;
+  const profileDirForReads = win32.join(paths.stubsDir, env.profile.id);
+  const priorReads = run.seed === null || run.readAllModAssets ? {} : readModReads(profileDirForReads, readsIdentity);
+  const reads: ModReads["assets"] = {};
+  let unchanged = 0;
   if (!run.readModAssets) {
     manual.push(...run.seed!.manual);
   } else if (assetList.length > 0) {
     let skipped = 0;
+    const seedManual = new Map((run.seed?.manual ?? []).map((m) => [m.asset, m]));
     await ctx.progress.run(
       "Reading mod assets",
       async (s) => {
         for (const [i, asset] of assetList.entries()) {
+          // An asset whose stage files and owned set are what they were at its last read keeps its entry (no editor read).
+          const files = run.stagingPath === "" ? null : stagePackageHash(run.stagingPath, mod, asset);
+          const own = ownedHash(owned[asset]);
+          const prior = priorReads[asset];
+          if (files !== null && prior !== undefined && prior.files === files && prior.owned === own) {
+            const kept = seedManual.get(asset);
+            if (prior.skipped === true || kept !== undefined) {
+              if (kept !== undefined && prior.skipped !== true) manual.push(kept);
+              else skipped++;
+              reads[asset] = prior;
+              unchanged++;
+              s.tick(i + 1, assetList.length);
+              continue;
+            }
+          }
           try {
             const snap = await backend.read(mod, asset);
             const text = deps.host.readFile(snap.exportPath);
             manual.push(manualFromExport(asset, text, snap.structure, owned[asset] ?? { units: [], variables: [] }));
+            if (files !== null) reads[asset] = { files, owned: own };
           } catch (e) {
             if (e instanceof AbfcError && e.diagnostic.code !== "ABFC4002" && e.diagnostic.code !== "ABFC4100") throw e;
             skipped++;
             // The mod also holds assets that are not Blueprints (mod config, class-manager rows, structs, metadata): the backend says so, and they have no stub to make.
-            if (e instanceof AbfcError && e.diagnostic.code === "ABFC4002" && NOT_A_BLUEPRINT.test(e.diagnostic.message)) continue;
+            if (e instanceof AbfcError && e.diagnostic.code === "ABFC4002" && NOT_A_BLUEPRINT.test(e.diagnostic.message)) {
+              if (files !== null) reads[asset] = { files, owned: own, skipped: true };
+              continue;
+            }
             output.diag({
               severity: "warning",
               code: "ABFC4002",
@@ -202,7 +260,8 @@ async function reflectAndRead(ctx: CliContext, backend: Backend, run: StubRun): 
       {
         total: assetList.length,
         slowHint: SLOW_BACKEND_HINT,
-        done: () => `Read ${manual.length} mod asset(s)${skipped > 0 ? `, ${skipped} skipped` : ""}`,
+        done: () =>
+          `Read ${manual.length} mod asset(s)${unchanged > 0 ? ` (${unchanged} unchanged since the last generate, not read again)` : ""}${skipped > 0 ? `, ${skipped} skipped` : ""}`,
       },
     );
   }
@@ -441,6 +500,11 @@ async function reflectAndRead(ctx: CliContext, backend: Backend, run: StubRun): 
       clearRetired: run.readModAssets,
     });
     if (first !== null && gameTags !== null) writeGameTags(profileDir, gameTags);
+    // after the stub cache that holds the entries: a run that stops earlier leaves the old record, so its assets are read again
+    if (run.readModAssets) {
+      const record: ModReads = { version: MOD_READS_VERSION, identity: readsIdentity, assets: reads };
+      writeFileAtomic(win32.join(profileDir, MOD_READS_FILE), JSON.stringify(record, null, 1) + "\n");
+    }
     mkdirSync(paths.abfcDir, { recursive: true });
     const layout = runtimeLayout();
     writeTsconfigPaths(
@@ -503,7 +567,7 @@ export async function generateStubs(ctx: CliContext, backend: Backend, mode: Stu
       fix: "point ABFC_BACKEND_DIR at a checkout that provides reflect (see docs/backend.md).",
     });
   }
-  const { resynced } = await ensureStage(backend, env, config, {
+  const { resynced, status: stageNow } = await ensureStage(backend, env, config, {
     resync: mode === "explicit" ? flags.resync : false,
     warn: (d) => output.diag(d),
     progress: ctx.progress,
@@ -602,6 +666,8 @@ export async function generateStubs(ctx: CliContext, backend: Backend, mode: Stu
     full,
     seed,
     readModAssets: mode === "explicit" || seed === null,
+    readAllModAssets: flags.full,
+    stagingPath: stageNow.stagingPath,
     classes,
     structs,
     castTargets: classes.filter((c) => c.startsWith("/Game/")),

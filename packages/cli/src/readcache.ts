@@ -56,12 +56,46 @@ export function referencedPackages(text: string, mod: string, self: string): str
   return [...out.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)).map((e) => e[1]);
 }
 
+/** The files of one mod package in the stage, sorted: every `Content/<path>.*` whose name matches (case-insensitive, like Unreal). */
+export function stagePackageFiles(stagingPath: string, mod: string, pkg: string): string[] {
+  const prefix = `/${mod}/`.toLowerCase();
+  if (stagingPath === "" || !pkg.toLowerCase().startsWith(prefix)) return [];
+  const parts = pkg.slice(prefix.length).split("/");
+  const name = parts.pop()!.toLowerCase();
+  const folder = join(stagingPath, "Content", ...parts);
+  let names: string[];
+  try {
+    names = readdirSync(folder);
+  } catch {
+    return [];
+  }
+  return names
+    .filter((f) => {
+      const dot = f.lastIndexOf(".");
+      return dot > 0 && f.slice(0, dot).toLowerCase() === name;
+    })
+    .sort()
+    .map((f) => join(folder, f));
+}
+
+/** Hash of the bytes of a mod package's files in the stage, or null when the stage holds none (or one cannot be read). */
+export function stagePackageHash(stagingPath: string, mod: string, pkg: string): string | null {
+  try {
+    const files = stagePackageFiles(stagingPath, mod, pkg);
+    if (files.length === 0) return null;
+    const h = createHash("sha256");
+    for (const f of files) h.update(`${f.slice(f.lastIndexOf(".")).toLowerCase()}:${sha(readFileSync(f))}\n`);
+    return h.digest("hex");
+  } catch {
+    return null;
+  }
+}
+
 export class ReadCache {
   readonly stats: ReadCacheStats = { hits: 0, misses: 0 };
   private readonly dir: string;
   private readonly indexFile: string;
   private index: Index;
-  private readonly prefix: string;
   /** Dependency file hashes by `path|size|mtime` (an own file is always hashed in full). */
   private readonly depMemo = new Map<string, string>();
 
@@ -73,7 +107,6 @@ export class ReadCache {
   ) {
     this.dir = join(cacheDir, "reads");
     this.indexFile = join(this.dir, "index.json");
-    this.prefix = `/${mod}/`.toLowerCase();
     this.index = this.load();
   }
 
@@ -87,25 +120,8 @@ export class ReadCache {
     return { version: READ_CACHE_VERSION, assets: {} };
   }
 
-  /** The files of one package in the stage, sorted: every `Content/<path>.*` whose name matches (case-insensitive, like Unreal). */
   private packageFiles(pkg: string): string[] {
-    if (this.stagingPath === "" || !pkg.toLowerCase().startsWith(this.prefix)) return [];
-    const parts = pkg.slice(this.prefix.length).split("/");
-    const name = parts.pop()!.toLowerCase();
-    const folder = join(this.stagingPath, "Content", ...parts);
-    let names: string[];
-    try {
-      names = readdirSync(folder);
-    } catch {
-      return [];
-    }
-    return names
-      .filter((f) => {
-        const dot = f.lastIndexOf(".");
-        return dot > 0 && f.slice(0, dot).toLowerCase() === name;
-      })
-      .sort()
-      .map((f) => join(folder, f));
+    return stagePackageFiles(this.stagingPath, this.mod, pkg);
   }
 
   /** Hash of a package's files ("none" when the stage holds none); `memo` uses size and mtime for files read before. */

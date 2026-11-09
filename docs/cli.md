@@ -84,7 +84,7 @@ Prints the project, the mod, the profile, the Node version, the install kind, th
 ## abfc generate
 
 ```
-abfc generate [--add <path>]... [--refresh] [--resync]
+abfc generate [--add <path>]... [--refresh] [--resync] [--full]
 ```
 
 `abfc stubs` is the old name of this command. It still works and does the same, prints a deprecation warning on standard error, and is no longer listed in the usage text.
@@ -96,6 +96,9 @@ Generates the stubs automatically. The backend lists the names of the whole game
 | `--add <path>` | Generate stubs for one more name; repeat it for several. A path is `/Script/<Package>.<Name>` (a class, struct or enum), a `/Game/...` class path (`/Game/Dir/BP_X.BP_X_C`) or a `/Game/...` module (every class of that Blueprint file). Added names are remembered in `stubs.lock.json` and kept by later runs. A name that is not in the catalog gives [ABFC3022](errors.md#abfc3022); a name that failed to reflect earlier is retried. |
 | `--refresh` | Forget the cached catalog and the cached reflection and generate everything again (the 3-4 minute full run). Use it after a game update that does not change the editor build, or to retry the classes recorded as failed ([ABFC3023](errors.md#abfc3023)). |
 | `--resync` | When mod assets are read, first recreate the staging copy from the mod (see [`abfc build`](#abfc-build)). |
+| `--full` | Read every hand-made mod asset from the editor again, also the ones that are unchanged. |
+
+Hand-made mod assets are read only when they are new or changed: `.abfc/stubs/<profile>/_modreads.json` keeps, for each asset, the hash of its files in the staging copy and of what abfc owns in it at its last read, and an asset whose hashes are the same keeps its stub without an editor read (about 15 s each). A new hand-made Blueprint (list it in `stubs.modAssets`, or use `"all"`) costs one read. The first run after an update of abfc reads every asset once.
 
 `generate --json` result: `{dir, files, members, opaque, modAssets, full, reflected, catalog, added, failed, notFound, used}` (`dir` is the profile folder; `files` and `members` count what was written; `opaque` lists types abfc could not describe; `modAssets` lists the hand-made mod assets that got stubs; `full` is true when the full game set was generated; `reflected` is the number of classes sent to the backend in this run; `catalog` is `{game, scriptClasses}` counts or null without a catalog; `added`, `failed` and `notFound` are the lists described above; `used` lists the placeholder types the source used that this run generated).
 

@@ -60,6 +60,8 @@ interface FakeOptions {
   catalog?: unknown;
   /** Receives every `catalog` call. */
   catalogCalls?: string[];
+  /** The staging copy the backend reports (default "C:\\Stage", which holds no files). */
+  stagingPath?: string;
   /** Reflect data for the n-th call (1-based); may throw. Default: the fixed first/second data of the classic tests. */
   reflect?: (r: ReflectRequest, n: number) => ReflectData;
 }
@@ -87,8 +89,8 @@ async function fakeBackend(
   });
   return {
     info: async () => info,
-    stage: async () => ({ mod: "TestMod", files: 1, stagingPath: "C:\\Stage" }),
-    stageStatus: async () => ({ mod: "TestMod", stagingPath: "C:\\Stage", syncedAt: "t", changed: [], added: [], removed: [], conflicts: [], stale: [] }),
+    stage: async () => ({ mod: "TestMod", files: 1, stagingPath: opts.stagingPath ?? "C:\\Stage" }),
+    stageStatus: async () => ({ mod: "TestMod", stagingPath: opts.stagingPath ?? "C:\\Stage", syncedAt: "t", changed: [], added: [], removed: [], conflicts: [], stale: [] }),
     read: async (_mod, asset) => {
       reads.push(asset);
       if (asset.endsWith("Missing")) throw new Error("read failed");
@@ -462,6 +464,50 @@ test("abfc generate: the second run reuses the catalog and the cache and reflect
     assert.equal(r.reads.length, 3);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("abfc generate: a mod asset whose stage files are unchanged since the last generate is not read again; a new or changed one is", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "abfc-cli-stubs-"));
+  const stage = mkdtempSync(join(tmpdir(), "abfc-cli-stage-"));
+  try {
+    const list = ["/TestMod/Items/BP_Hand", "/TestMod/Items/BP_Rope", "/TestMod/Items/Data"];
+    const fake = setup(tmp, list);
+    fake.files[join(tmp, "abf.config.json")] = JSON.stringify({
+      mod: { name: "TestMod" },
+      backend: { kind: "bp_apply", minProtocol: 1 },
+      stubs: { classes: [BP_FAKE], scriptClasses: [THING], modAssets: list },
+    });
+    const items = join(stage, "Content", "Items");
+    mkdirSync(items, { recursive: true });
+    writeFileSync(join(items, "BP_Hand.uasset"), "hand v1");
+    writeFileSync(join(items, "Data.uasset"), "data");
+    const o = { stagingPath: stage };
+    let r = await runAuto(fake, tmp, ["generate"], o);
+    assert.equal(r.code, 0, r.out);
+    // BP_Rope has no file in the stage yet: read (and not recorded)
+    assert.deepEqual(r.reads, list);
+
+    r = await runAuto(fake, tmp, ["generate"], o);
+    assert.equal(r.code, 0, r.out);
+    assert.deepEqual(r.reads, ["/TestMod/Items/BP_Rope"], "BP_Hand and the non-Blueprint Data are unchanged");
+    assert.match(r.out, /2 unchanged since the last generate/);
+
+    // a new asset in the stage and an edited one are read; the unchanged one is not
+    writeFileSync(join(items, "BP_Rope.uasset"), "rope");
+    writeFileSync(join(items, "BP_Hand.uexp"), "hand v2 body");
+    r = await runAuto(fake, tmp, ["generate"], o);
+    assert.deepEqual(r.reads, ["/TestMod/Items/BP_Hand", "/TestMod/Items/BP_Rope"]);
+    r = await runAuto(fake, tmp, ["generate"], o);
+    assert.deepEqual(r.reads, []);
+    assert.match(r.out, /hand-made assets: 2/);
+
+    // --full reads every asset again
+    r = await runAuto(fake, tmp, ["generate", "--full"], o);
+    assert.deepEqual(r.reads, list);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+    rmSync(stage, { recursive: true, force: true });
   }
 });
 
