@@ -716,6 +716,8 @@ export class FakeBackend implements Backend {
   async stageStatus(mod: string): Promise<StageStatus | null> {
     this.calls.push({ tool: "staging_status" });
     if (!this.staged || mod !== "TestMod") return null; // the only mod of the fake machine
+    // Tests edit the fake stage in memory between commands (as the editor would on disk): the files follow.
+    this.mirrorFiles();
     return {
       mod,
       stagingPath: join(this.root, "stage"),
@@ -899,10 +901,12 @@ export class FakeBackend implements Backend {
   private mirrorFiles(): void {
     const content = join(this.root, "stage", "Content");
     rmSync(content, { recursive: true, force: true });
+    // The file holds what a read returns, so a changed asset has changed bytes (abfc's read cache keys on them).
     for (const path of [...this.assets.keys(), ...this.rowClasses.keys()]) {
       const file = join(content, ...path.split("/").slice(2)) + ".uasset";
       mkdirSync(dirname(file), { recursive: true });
-      writeFileSync(file, "", "utf8");
+      const a = this.assets.get(path);
+      writeFileSync(file, a !== undefined ? renderAsset(a) : `row ${this.rowClasses.get(path) ?? ""}`, "utf8");
     }
   }
 

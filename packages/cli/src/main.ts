@@ -41,7 +41,7 @@ const USAGE = [
   "commands: init, lsp, version, " + Object.keys(COMMANDS).join(", "),
   "options: --json --verbose --quiet --project <dir> --editor-root <dir> --mods-dir <dir> --mod-dir <dir>",
   "         --backend-dir <dir> --python <exe> --headless-dir <dir> --timings --resync --no-build --yes --dry-run --full --discard-editor-changes --cold --watch (check)",
-  "         --drift (build) --keep-failed-stage (build, test, publish)",
+  "         --drift --full (build: every asset from the editor, no read cache) --keep-failed-stage (build, test, publish)",
   "output:  results on stdout; diagnostics and progress on stderr (live on a terminal, one line per step otherwise); -q/--quiet hides progress, --json prints one JSON document and no progress",
   "generate: abfc generate [--add <path>]... [--refresh] [--resync]",
   "doctor:  abfc doctor [--deep] [--clean-runtimes]",

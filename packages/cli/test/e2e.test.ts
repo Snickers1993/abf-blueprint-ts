@@ -293,7 +293,8 @@ test("(b1q) a stage read that fails after the re-sync does not drop the units of
     writeFileSync(src, readFileSync(src, "utf8").replace("const rowName = Lib.RowToName(pot.Row);", "const rowName = Lib.RowToName(pot.Row); this.LastName = rowName;"), "utf8");
     r.backend.reportMessages = [{ severity: "error", asset: RELAY_ASSET, message: "boom" }];
     r.backend.failReadsAfterResync = true;
-    x = await r.run(["build"]);
+    // --full: no read cache, so the read after the re-sync really goes to the (failing) backend
+    x = await r.run(["build", "--full"]);
     assert.notEqual(x.code, 0, x.out);
     const after = readManifest(r.dir, RELAY_ASSET)!.units;
     assert.equal(after.length, before.length, "the units are not dropped when the stage cannot be read");

@@ -10,6 +10,7 @@ abfc uses semantic versioning for its command-line surface: the commands, their 
 
 ### Added
 
+- Read cache (`.abfc/cache/reads`): a build serves `bp_read` of an owned asset from the cache when the asset's files in the staging copy, and the files of the mod packages its export references, are byte-identical to an earlier read (and the backend, editor and stub identity are the same). After a re-sync (any file of the mod saved in the Mod Editor, or a failed compile) a build used to read every owned asset twice from the hidden editor, about 10 s each; now only the assets that changed. `abfc build --full` reads every owned asset from the editor without the cache.
 - A `float` parameter or field takes a `double` (the editor converts real to float on the pin, as when wired by hand); `float` stays its own Blueprint type. `KismetSystemLibrary.Delay(this.Seconds)` with a double field no longer needs a float copy.
 
 - `asset(Class, path)` in `@abfc/runtime`: a hard reference to an existing asset (`asset(StaticMesh, "@mod/Meshes/SM_Crate")`, `asset(SoundBase, "/Game/Audio/S_Beep")`) as the default object of the pin it feeds: a call argument, an array `push` or element write, or a variable set. No load node, so the asset cooks with the Blueprint. `@mod/` names the mod being built; a path without an object name gets the asset name appended. A path that is not a package path is ABFC2099. A class or asset reference that reaches a pin that cannot hold a default object now fails the build instead of being dropped.

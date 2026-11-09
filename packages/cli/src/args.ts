@@ -18,7 +18,7 @@ export interface CliFlags {
   yes: boolean;
   discardEditorChanges: boolean;
   dryRun: boolean;
-  /** `--full`: `abfc publish` runs the release checks (tests, stage audit, upload file check) before the copy. */
+  /** `--full`: `abfc publish` runs the release checks (tests, stage audit, upload file check) before the copy; `abfc build` reads every owned asset from the editor (no read cache). */
   full: boolean;
   /** `--cold`: do not use the backend warm session (one editor start per operation). */
   cold: boolean;

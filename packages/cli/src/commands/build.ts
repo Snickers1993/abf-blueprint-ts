@@ -24,6 +24,7 @@ import { win32 } from "node:path";
 import type { CliContext } from "../context.js";
 import { SLOW_BACKEND_HINT } from "../progress.js";
 import { readUnitCache, stubLockHashOf, writeUnitCache } from "../unitcache.js";
+import { ReadCache, readCacheIdentity } from "../readcache.js";
 import type { UnitCache } from "../unitcache.js";
 import {
   BackendSession,
@@ -38,8 +39,10 @@ import {
   previousNames,
   pruneManifestsToStage,
   readAsset,
+  readCacheOf,
   sourceMapOf,
   since,
+  useReadCache,
 } from "./common.js";
 import { refreshTagsFile } from "../tags.js";
 import { deleteRetiredRows, runAssetOps, runParentChange } from "./assetops.js";
@@ -193,6 +196,15 @@ async function buildInner(ctx: CliContext, session: BackendSession, rec: Recorde
     warn: (d) => output.diag(d),
     progress: ctx.progress,
   });
+  // Reads of assets whose stage files (and referenced mod files) are byte-identical to an earlier read come from .abfc/cache/reads,
+  // not the editor: after a re-sync that is every asset nobody saved. `--full` (build and publish) reads everything from the editor.
+  const fullRead = args.flags.full;
+  useReadCache(
+    ctx,
+    fullRead || stage.stagingPath === ""
+      ? null
+      : new ReadCache(paths.cacheDir, stage.stagingPath, mod, readCacheIdentity({ server: info.serverVersion, engine: info.engineVersion, ext: info.extensions, caps, stubs: stubLockHashOf(readLock(win32.join(ctx.paths.stubsDir, profile.id))), profile: profile.id })),
+  );
   // The assets the Mod Editor saved (their files caused the re-sync): their class defaults are applied again, TypeScript wins.
   const editedInMod = new Set<string>();
   for (const rel of changedInMod) {
@@ -315,7 +327,7 @@ async function buildInner(ctx: CliContext, session: BackendSession, rec: Recorde
   // Assets that cannot have anything to plan are not read (no drift check there; `abfc status` still reads everything), unless `readAll`.
   const tRead = performance.now();
   const existing = owned.filter((a) => !missing.has(a.path));
-  const toRead = readAll ? new Set(existing.map((a) => a.path)) : assetsNeedingRead({ ...ir, assets: existing }, { manifests, stage, forceReplan, directorRows: caps.classManagerRows, editedInMod });
+  const toRead = readAll || fullRead ? new Set(existing.map((a) => a.path)) : assetsNeedingRead({ ...ir, assets: existing }, { manifests, stage, forceReplan, directorRows: caps.classManagerRows, editedInMod });
   // The asset ops edited the nodes of renamed assets and of their referencers: those are read too, so drifted units are replaced now
   // (editedByAbfc) instead of reading as editor edits in `abfc status` and blaming the modder at the next real change.
   for (const p of assetOpsOutcome.edited ?? []) if (existing.some((a) => a.path === p)) toRead.add(p);
@@ -331,6 +343,7 @@ async function buildInner(ctx: CliContext, session: BackendSession, rec: Recorde
     snapshotVariableTypes.set(path, new Map(parsed.variables.map((v) => [v.name, v.type])));
     snapshotParents.set(path, parsed.parentClass);
   };
+  const hitsBefore = readCacheOf(ctx)?.stats.hits ?? 0;
   if (readAssets.length > 0) {
     await ctx.progress.run(
       "Reading owned assets",
@@ -343,7 +356,10 @@ async function buildInner(ctx: CliContext, session: BackendSession, rec: Recorde
       {
         total: readAssets.length,
         slowHint: SLOW_BACKEND_HINT,
-        done: () => `Read ${readAssets.length} asset(s)${skipped.length > 0 ? `, ${skipped.length} unchanged not read` : ""}`,
+        done: () => {
+          const cached = (readCacheOf(ctx)?.stats.hits ?? 0) - hitsBefore;
+          return `Read ${readAssets.length} asset(s)${cached > 0 ? ` (${cached} unchanged since an earlier read, from the cache)` : ""}${skipped.length > 0 ? `, ${skipped.length} unchanged not read` : ""}`;
+        },
       },
     );
   }

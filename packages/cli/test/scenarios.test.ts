@@ -1164,3 +1164,41 @@ test("(S33) per-graph node names (as in Unreal): a class with functions has no d
     assert.doesNotMatch(x.out, /ABFC500[12]/, x.out);
   });
 });
+
+test("(S40) after a re-sync the build reads only assets whose files changed since an earlier read; --full reads every asset from the editor", async () => {
+  await withRig({ handMadeEvent: false }, async (r) => {
+    writeFileSync(join(r.dir, "src", "Tally.ts"), tally("BP_Tally"), "utf8"); // two owned assets: BP_Relay and BP_Tally
+    let x = await r.run(["build"]);
+    assert.equal(x.code, 0, x.out);
+    r.backend.markPublished();
+    const reads = (): number => r.backend.calls.filter((c) => c.tool === "bp_read").length;
+    // The Mod Editor saved some other file of the mod: the next build re-syncs and goes over every owned asset.
+    r.backend.stageStale = ["Content/Rooms/M_SomeMaterial.uasset"];
+    x = await r.run(["build"]);
+    assert.equal(x.code, 0, x.out);
+    assert.match(x.out, /warning ABFC4017/);
+    const first = reads();
+
+    // The same again: nothing abfc owns changed, so every read comes from the cache.
+    r.backend.stageStale = ["Content/Rooms/M_SomeMaterial.uasset"];
+    x = await r.run(["build"]);
+    assert.equal(x.code, 0, x.out);
+    assert.match(x.out, /warning ABFC4017/);
+    assert.equal(reads(), first, "no bp_read after a re-sync that left the owned assets' files as they were");
+
+    // An editor edit of an owned asset changes its file: only that asset is read from the editor (and the edit is found, TS wins).
+    r.backend.stageStale = ["Content/Tally.uasset"];
+    r.backend.addHandMadeVariable("/TestMod/BP_Tally", "HandMade", "bool");
+    r.backend.markPublished();
+    x = await r.run(["build"]);
+    assert.equal(x.code, 0, x.out);
+    assert.ok(reads() > first, "the edited asset is read again");
+    assert.ok(reads() - first <= 2, `only the edited asset is read (twice at most: re-sync check and plan), got ${reads() - first}`);
+
+    // --full: every owned asset from the editor.
+    const beforeFull = reads();
+    x = await r.run(["build", "--full"]);
+    assert.equal(x.code, 0, x.out);
+    assert.ok(reads() - beforeFull >= 2, `--full reads every owned asset, got ${reads() - beforeFull}`);
+  });
+});
