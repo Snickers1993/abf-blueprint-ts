@@ -119,6 +119,10 @@
     "modsDir": {
       "type": "string",
       "description": "Machine-specific folder that holds the mods. Put it in the user config."
+    },
+    "protectEditorEdits": {
+      "type": "boolean",
+      "description": "true: abfc build refuses (ABFC5019) to remove or replace what was made by hand in the Mod Editor; abfc build --replace-editor-edits lets one build do it. Default false (TypeScript wins, ABFC5014 warning)."
     }
   }
 }

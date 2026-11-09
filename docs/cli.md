@@ -120,12 +120,12 @@ Type-checks the project, applies the subset rules, lowers every class to Bluepri
 ## abfc build
 
 ```
-abfc build [--resync] [--drift] [--full] [--keep-failed-stage]
+abfc build [--resync] [--drift] [--full] [--keep-failed-stage] [--replace-editor-edits]
 ```
 
 Compiles the project and applies only the units whose TypeScript changed to a private staging copy of the mod, then compiles the changed Blueprints in Unreal. Your mod is not changed; `abfc publish` copies the result. The first build creates the staging copy. A build that finds nothing to do prints "up to date".
 
-TypeScript wins: a build makes each Blueprint it applies match the `.ts` file. What was changed in the Mod Editor is replaced, and one [ABFC5014](errors.md#abfc5014) warning per asset lists it; in a class without a `_Manual` interface merge the hand-made nodes, function graphs and variables are removed too. The build never refuses because of editor edits. A plain build reads only the assets whose TypeScript changed (use `--drift` for all).
+TypeScript wins: a build makes each Blueprint it applies match the `.ts` file. What was changed in the Mod Editor is replaced, and one [ABFC5014](errors.md#abfc5014) warning per asset lists it; in a class without a `_Manual` interface merge the hand-made nodes, function graphs and variables are removed too. The build never refuses because of editor edits, unless `"protectEditorEdits": true` is set in abf.config.json: then a build that would remove or replace hand-made work stops with [ABFC5019](errors.md#abfc5019) and applies nothing, and `abfc build --replace-editor-edits` lets one build replace it. A plain build reads only the assets whose TypeScript changed (use `--drift` for all).
 
 Read cache: every read of an owned asset is kept in `.abfc/cache/reads`, keyed by the bytes of the asset's files in the staging copy and of the mod files its export references. When the staging copy is copied from the mod again (the Mod Editor saved any file of the mod, a failed compile, `--resync`), a build has to look at every owned asset; with the cache only the assets whose files, or the files they reference, changed are read from the editor. `--full` turns the cache off and reads every owned asset from the editor (as `--drift` does); `abfc publish --full` never uses the cache either.
 

@@ -1383,6 +1383,16 @@ Typical cause: you renamed or removed the struct, as ABFC2046 suggests for a fie
 
 Fix: delete the struct in the Mod Editor once no Blueprint uses it, or declare it in TypeScript again (nothing else is needed; if you remove it again later, abfc warns again).
 
+### ABFC5019
+
+Severity: error · Exit: 1
+
+Meaning: `protectEditorEdits` is on in abf.config.json and this build would remove or replace work made in the Mod Editor: hand-made nodes, function graphs or variables of a class without a `_Manual` interface merge, a hand-made event or function with a body that has the name of a TypeScript unit, or an edit of nodes abfc built (ABFC5001). The message lists it. Nothing is applied. An empty hand-made override (made only so the build fills it) is not protected.
+
+Typical cause: the Blueprint was changed in the Mod Editor after it was built from TypeScript.
+
+Fix: move the work into the `.ts` file, or keep it by making the class hybrid (`interface X extends X_Manual {}`). To let TypeScript win once, run `abfc build --replace-editor-edits` (the old behaviour: [ABFC5014](#abfc5014) lists what went).
+
 ### ABFC5101
 
 Severity: warning · Exit: -

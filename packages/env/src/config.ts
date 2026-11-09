@@ -35,6 +35,12 @@ export interface ProjectConfig {
   editor?: { root?: string };
   headlessDir?: string;
   modsDir?: string;
+  /**
+   * `true`: a build refuses (ABFC5019) to remove or replace what was made by hand in the Mod Editor (hand-made nodes, functions,
+   * variables, events, and edits of abfc's own nodes) instead of replacing it with a warning (ABFC5014). `abfc build
+   * --replace-editor-edits` lets one build replace them. Default false (TypeScript wins).
+   */
+  protectEditorEdits?: boolean;
 }
 
 export const PROJECT_CONFIG_FILE = "abf.config.json";
@@ -216,6 +222,10 @@ function parseConfig(file: string, raw: unknown, partial: boolean): Partial<Proj
   if (headlessDir !== undefined) out.headlessDir = headlessDir;
   const modsDir = optStr(file, root, "modsDir", "");
   if (modsDir !== undefined) out.modsDir = modsDir;
+  if (root.protectEditorEdits !== undefined) {
+    if (typeof root.protectEditorEdits !== "boolean") fail(file, "protectEditorEdits", "expected true or false");
+    out.protectEditorEdits = root.protectEditorEdits as boolean;
+  }
   return out;
 }
 

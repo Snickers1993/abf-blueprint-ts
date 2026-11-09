@@ -42,6 +42,8 @@ export interface CliFlags {
   drift: boolean;
   /** `--keep-failed-stage`: after an Unreal compile failure the stage keeps the failed graphs (no re-sync). */
   keepFailedStage: boolean;
+  /** `--replace-editor-edits`: with `protectEditorEdits` on, this build replaces hand-made work anyway (TypeScript wins, ABFC5014). */
+  replaceEditorEdits: boolean;
   /** `--add <path>` (repeatable): `abfc generate` also generates stubs for this class, struct or enum (`/Script/<Package>.<Name>`, a `/Game/...` class or module). */
   add: string[];
   /** `--refresh`: `abfc generate` discards the cached class catalog and reflect data and generates everything again. */
@@ -100,6 +102,7 @@ export function parseCliArgs(argv: string[]): ParsedArgs {
         version: { type: "boolean" },
         drift: { type: "boolean" },
         "keep-failed-stage": { type: "boolean" },
+        "replace-editor-edits": { type: "boolean" },
         add: { type: "string", multiple: true },
         refresh: { type: "boolean" },
         // `abfc lsp` accepts what language clients add; the values are ignored
@@ -150,6 +153,7 @@ export function parseCliArgs(argv: string[]): ParsedArgs {
       version: v.version === true,
       drift: v.drift === true,
       keepFailedStage: v["keep-failed-stage"] === true,
+      replaceEditorEdits: v["replace-editor-edits"] === true,
       add: v.add ?? [],
       refresh: v.refresh === true,
     },

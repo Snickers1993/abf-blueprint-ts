@@ -403,6 +403,7 @@ async function buildInner(ctx: CliContext, session: BackendSession, rec: Recorde
 
   const planIr: IrModule = { ...ir, assets: [...structAssets, ...owned.filter((a) => toRead.has(a.path) || missing.has(a.path))] };
   const planned = planBuild(planIr, {
+    protectEditorEdits: config.protectEditorEdits === true && !args.flags.replaceEditorEdits,
     manifests,
     snapshots,
     stage,

@@ -1842,6 +1842,43 @@ test("(A8-2) a hand-made event, variable and function graph on a non-hybrid asse
   });
 });
 
+test("(A8-2p) protectEditorEdits: a build that would remove hand-made work refuses (ABFC5019) and applies nothing; --replace-editor-edits lets it", async () => {
+  await withRig({}, async (r) => {
+    rmSync(join(r.dir, "src", "Relay.ts"));
+    rmSync(join(r.dir, "src", "Relay.test.ts"));
+    writeFileSync(join(r.dir, "src", "Tally.ts"), TALLY, "utf8");
+    const cfgFile = join(r.dir, "abf.config.json");
+    writeFileSync(cfgFile, JSON.stringify({ ...JSON.parse(readFileSync(cfgFile, "utf8")), protectEditorEdits: true }), "utf8");
+    let x = await r.run(["build"]);
+    assert.equal(x.code, 0, x.out);
+
+    const handNodes = r.backend.addHandMadeEvent(TALLY_ASSET, "MyOwnEvent");
+    r.backend.addHandMadeVariable(TALLY_ASSET, "Mine", "int");
+    r.backend.addHandMadeFunction(TALLY_ASSET, "HandFn");
+    const before = appliedSpecs(r).length;
+
+    x = await r.run(["build", "--drift"]);
+    assert.equal(x.code, 1, x.out);
+    assert.match(x.out, /error ABFC5019/);
+    assert.match(x.out, /HandFn/);
+    assert.match(x.out, /Mine/);
+    assert.equal(appliedSpecs(r).length, before, "nothing was applied");
+    const held = r.backend.nodeNames(TALLY_ASSET);
+    for (const n of handNodes) assert.ok(held.includes(n), `${n} is still on the stage`);
+    assert.deepEqual(r.backend.functionNames(TALLY_ASSET), ["HandFn"]);
+
+    // one build may replace it (TypeScript wins, the old ABFC5014 warning)
+    x = await r.run(["build", "--drift", "--replace-editor-edits"]);
+    assert.equal(x.code, 0, x.out);
+    assert.match(x.out, /warning ABFC5014/);
+    assert.deepEqual(r.backend.functionNames(TALLY_ASSET), []);
+
+    // nothing left to protect: a plain build passes again
+    x = await r.run(["build", "--drift"]);
+    assert.equal(x.code, 0, x.out);
+  });
+});
+
 test("(R1) components, the widget tree and timeline templates in the stage export are not graphs: the sweep never lists them, only the hand-made event goes", async () => {
   await withRig({}, async (r) => {
     rmSync(join(r.dir, "src", "Relay.ts"));
