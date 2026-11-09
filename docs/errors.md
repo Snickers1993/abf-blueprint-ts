@@ -871,6 +871,16 @@ Fix: write the value as a plain string literal.
 
 The stubs are the `.d.ts` files `abfc generate` writes from the Mod Editor; the lock file next to them records which editor build and configuration they belong to. These codes mean the stubs are missing, out of date or incomplete. They all exit with 2.
 
+### ABFC2103
+
+Severity: warning · Exit: -
+
+Meaning: `if (!isValid(x))` comes right after `const x = cast(...)`, and its branch does more than `return;`. When the cast fails, the unit ends at the cast; the branch does not run (only a valid object of the wrong class reaches it). `if (!isValid(x)) return;` is not reported: ending the unit does the same thing.
+
+Typical cause: a log line, a counter or a fallback inside `if (!isValid(x)) { ... }` after a cast.
+
+Fix: write `if (!x) { ... }`, which runs the branch when the cast fails. `if (isValid(x)) { ... } else { ... }` runs the else side for a failed cast too.
+
 ### ABFC3001
 
 Severity: error in `abfc build` and `abfc publish`, warning in `abfc check` · Exit: 2 (error), - (warning). The generator-version variant is always a warning.
