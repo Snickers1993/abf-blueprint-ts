@@ -71,7 +71,7 @@ test("test options, t.find, moveTo, aim, t.distance, waitUntil, below/above, a t
   assert.equal(c.timeoutSeconds, 400);
   const dist = `result = ctx["me"].get_distance_to(ctx["hook"])`;
   assert.deepEqual(stepsOf(c), [
-    { op: "find", base: "Actor", class_contains: "BP_Relay_C", as: "me", timeout: 90 },
+    { op: "find", base: "Actor", class_contains: "PersistentLevel.BP_Relay_C_", as: "me", timeout: 90 },
     { op: "spawn", class: "/TestMod/Relay/BP_Relay.BP_Relay_C", as: "hook" },
     { op: "python", code: `ctx["me"].set_actor_location(unreal.Vector(100.0, -2.5, 300.0), False, True)` },
     {

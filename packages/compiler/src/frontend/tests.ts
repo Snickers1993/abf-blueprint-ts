@@ -164,10 +164,14 @@ class TestCompiler {
     return { code, known };
   }
 
-  /** `t.find(Class, { timeout })`: the first actor of the class in the world, waited for. */
+  /**
+   * `t.find(Class, { timeout })`: the first actor of the class placed or spawned in a level, waited for. The backend's `find`
+   * matches a substring of the object's path; `PersistentLevel.<Class>_` (an instance is named `<Class>_<n>`) keeps out the
+   * actor templates a Blueprint class holds (`<Class>:Child_GEN_VARIABLE...`, at the origin, in no world).
+   */
   private findStep(call: ts.CallExpression, as: string): Record<string, unknown> {
     const path = this.classPathArg(call.arguments[0], call);
-    const step: Record<string, unknown> = { op: "find", base: "Actor", class_contains: path.slice(path.lastIndexOf(".") + 1), as };
+    const step: Record<string, unknown> = { op: "find", base: "Actor", class_contains: `PersistentLevel.${path.slice(path.lastIndexOf(".") + 1)}_`, as };
     const o = this.options(call.arguments[1], ["timeout"], "t.find");
     if (o.timeout !== undefined) step["timeout"] = o.timeout;
     return step;

@@ -176,7 +176,7 @@ Builds (unless `--no-build`), compiles the tests of the project and runs each on
 | In a test | Step |
 | --- | --- |
 | `t.spawn(Class)` | spawns an actor (at the origin) |
-| `t.find(Class, { timeout })` | the first actor of the class in the world, waited for (the player: `t.find(Abiotic_PlayerCharacter_C)`) |
+| `t.find(Class, { timeout })` | the first actor of exactly that class in a level, waited for (the player: `t.find(Abiotic_PlayerCharacter_C)`); actor templates inside Blueprint classes are not matched |
 | `h.call("Fn", ...)`, `h.get("Var")`, `h.set("Var", v)` | calls a function or event, reads or writes a variable |
 | `h.moveTo(x, y, z)`, `h.moveTo(other)`, `h.aim(pitch, yaw)` | teleports an actor; turns it and its controller's view (the player's camera follows) |
 | `t.distance(a, b)` | the distance between two actors (cm) |
