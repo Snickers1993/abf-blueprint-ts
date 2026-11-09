@@ -1791,7 +1791,11 @@ class HirBuilder {
         if (memberSym && bpPathOf(memberSym) !== undefined) f.fail("ABFC2099", `${name} is not a Blueprint variable`, node.name);
         return f.fail("ABFC2060", `member ${name} has no Blueprint metadata (@bpPath)`, node.name);
       }
-      const bpName = splitMemberPath(bpPathOf(memberSym!) ?? "")?.name ?? name;
+      const mp = splitMemberPath(bpPathOf(memberSym!) ?? "");
+      const bpName = mp?.name ?? name;
+      // a member a parent class declares: the get names that class, so the backend's scratch Blueprint (an Actor) can
+      // build its pins (a self-context get of IsDepleted on a game crate had none)
+      if (mp && mp.owner !== this.cls.classPath) return { k: "getSelf", name: bpName, owner: mp.owner, type, span: sp };
       return { k: "getSelf", name: bpName, type, span: sp };
     }
 

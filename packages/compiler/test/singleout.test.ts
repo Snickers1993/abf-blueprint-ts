@@ -100,3 +100,56 @@ test("[] for an array input leaves the pin unwired (an empty array)", () => {
   assert.ok(!(u.wires as Array<[string, string]>).some(([, b]) => b === `${call.id}.Ignore`));
   assert.equal(call.pinDefaults?.Ignore, undefined);
 });
+
+const CRATE_STUB = `import { Actor } from "/Script/FakeEngine";
+/**
+ * @bpPath /Game/Fake/BP_FakeCrate.BP_FakeCrate_C
+ * @bpMeta /Script/Engine.BlueprintGeneratedClass
+ */
+export declare class BP_FakeCrate_C extends Actor {
+  /**
+   * @bpPath /Game/Fake/BP_FakeCrate.BP_FakeCrate_C:IsDepleted
+   * @bpType bool
+   */
+  IsDepleted: boolean;
+}
+`;
+
+const CRATE_SOURCE = `import { blueprint } from "@abfc/runtime";
+import type { int } from "@abfc/runtime";
+import { BP_FakeCrate_C } from "/Game/Fake/BP_FakeCrate";
+
+@blueprint({ path: "/TestMod/Relay/BP_MyCrate" })
+export class BP_MyCrate extends BP_FakeCrate_C {
+  Hits: int = 0;
+  private Check(): boolean {
+    if (this.IsDepleted) return this.Hits > 0;
+    return false;
+  }
+}
+`;
+
+test("a variable a parent class declares is read with its class as MemberParent; an own one stays self-context", () => {
+  const dir = mkdtempSync(join(here, "single-"));
+  try {
+    cpSync(phase2Dir, dir, { recursive: true });
+    for (const f of ["Phase2Bad.ts", "Counter.ts", "Director.ts"]) rmSync(join(dir, "src", f));
+    writeFileSync(join(dir, ".abfc", "stubs", "test", "Game", "Fake", "BP_FakeCrate.d.ts"), CRATE_STUB, "utf8");
+    writeFileSync(join(dir, "src", "Crate.ts"), CRATE_SOURCE, "utf8");
+    const loaded = loadProgram(dir);
+    assert.deepEqual(loaded.diagnostics, []);
+    const hir = buildHir(loaded, { mod: "TestMod" }, profile);
+    assert.deepEqual(hir.diagnostics, []);
+    const ir = lower(hir, profile);
+    assert.deepEqual(validateIrModule(ir), []);
+    const u = ir.assets.find((a) => a.path.endsWith("BP_MyCrate"))!.units.find((x) => x.id === "function:Check")!;
+    const gets = u.nodes.filter((n) => n.sem?.k === "get");
+    const dep = gets.find((n) => n.sem?.k === "get" && n.sem.name === "IsDepleted")!;
+    assert.deepEqual(dep.sem, { k: "get", name: "IsDepleted", class: "/Game/Fake/BP_FakeCrate.BP_FakeCrate_C" });
+    assert.ok(!(u.wires as Array<[string, string]>).some(([, b]) => b === `${dep.id}.self`), "Target stays self");
+    const hits = gets.find((n) => n.sem?.k === "get" && n.sem.name === "Hits")!;
+    assert.deepEqual(hits.sem, { k: "get", name: "Hits" });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

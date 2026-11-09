@@ -97,7 +97,8 @@ export type HirExpr = (
   | { k: "param"; name: string }
   | { k: "local"; id: LocalId }
   | { k: "lit"; value: string | number | boolean | null }
-  | { k: "getSelf"; name: string }
+  /** `owner`: the class declaring an inherited variable or component (not this class), written as the get's MemberParent. */
+  | { k: "getSelf"; name: string; owner?: string }
   | { k: "getOn"; obj: HirExpr; owner: string; name: string }
   | { k: "field"; obj: HirExpr; struct: string; name: string } // struct member read -> BreakStruct
   | { k: "out"; call: HirExpr; pin: string } // multi-output / exec-result member

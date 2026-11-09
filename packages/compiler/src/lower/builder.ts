@@ -395,6 +395,11 @@ export class UnitBuilder {
       case "lit":
         return this.unsupported("a literal in this position", e.span);
       case "getSelf":
+        if (e.owner !== undefined) {
+          // its self pin stays unwired: Target is self
+          const id = this.emit("get", this.profile.nodeClasses.variableGet, [this.varRef(e.name, e.owner)], { k: "get", name: e.name, class: e.owner }, e.span);
+          return { pin: `${id}.${e.name}`, nulls: [] };
+        }
         return { pin: this.getVar(e.name, e.span), nulls: [] };
       case "getOn": {
         const src = this.value(e.obj);
