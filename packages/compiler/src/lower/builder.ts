@@ -653,8 +653,7 @@ export class UnitBuilder {
     if (target) this.link(target.pin, `${id}.${P.self}`);
     for (const f of fed) this.feed(f.o, id, f.pin, defaults, objects);
     this.settle(id, defaults, objects);
-    const only = e.execOutputs === null && e.outs.length === 1 ? e.outs[0]?.pin : undefined;
-    const result: Value = { pin: `${id}.${only ?? P.returnValue}`, nulls };
+    const result: Value = { pin: `${id}.${P.returnValue}`, nulls };
     if (e.execOutputs) {
       this.cur = [];
       result.execOuts = Object.fromEntries(e.execOutputs.map((p) => [p, [`${id}.${p}`]]));

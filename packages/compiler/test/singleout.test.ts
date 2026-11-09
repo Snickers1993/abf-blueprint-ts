@@ -26,7 +26,7 @@ export declare class Box {
    * @bpParam ClassFilter class:/Script/FakeEngine.Actor
    * @bpOut OverlappingActors array:object:/Script/FakeEngine.Actor
    */
-  GetOverlappingActors(ClassFilter: TSubclassOf<Actor> | (abstract new (...a: never[]) => Actor) | null): Actor[];
+  GetOverlappingActors(ClassFilter: TSubclassOf<Actor> | (abstract new (...a: never[]) => Actor) | null): { OverlappingActors: (Actor | null)[] };
   /**
    * @bpPath /Script/FakeOverlap.Box:Trace
    * @bpParam Ignore array:object:/Script/FakeEngine.Actor
@@ -44,14 +44,15 @@ import type { Box } from "/Script/FakeOverlap";
 export class BP_Overlap extends Actor {
   Count: int = 0;
   private Anyone(box: Box): boolean {
-    return box.GetOverlappingActors(Actor).length > 0;
+    const o = box.GetOverlappingActors(Actor);
+    return o.OverlappingActors.length > 0;
   }
   private Empty(box: Box): boolean {
     return box.Trace([]);
   }
   private Store(box: Box): void {
     const all = box.GetOverlappingActors(null);
-    this.Count = all.length;
+    this.Count = all.OverlappingActors.length;
   }
 }
 `.replace('import { blueprint } from "@abfc/runtime";', 'import { blueprint } from "@abfc/runtime";\nimport type { int } from "@abfc/runtime";');
@@ -75,7 +76,7 @@ function irOf(): IrModule {
   }
 }
 
-test("a call whose only output is an out parameter is a value read from that pin (array length, const)", () => {
+test("a call whose only output is an out parameter is a result read through that pin (as the stubs type it)", () => {
   const ir = irOf();
   const asset = ir.assets.find((a) => a.path.endsWith("BP_Overlap"))!;
   for (const id of ["function:Anyone", "function:Store"]) {
