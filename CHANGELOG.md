@@ -10,6 +10,7 @@ abfc uses semantic versioning for its command-line surface: the commands, their 
 
 ### Added
 
+- A function-graph override takes its access specifier from the parent: the backend writes its entry without access bits (Unreal ORs the parent's in; a game function without any, such as `GunStartFiring`, refused every explicit one with "Access specifier is not compatible the parent function"). A `/** @bpAccess protected */` doc tag on the method states one explicitly. Backend patches backend-override-access.patch and backend-override-no-access-bits.patch.
 - Components: `Mesh = component(StaticMeshComponent, { StaticMesh: asset(StaticMesh, "@mod/SM_Crate"), RelativeLocation: { X: 0, Y: 0, Z: 50 } }, { attachTo: "Root" })` in an Actor class. The backend creates the component when it is missing and sets the properties on its template (backend feature `components`; without it ABFC2044); `this.Mesh` reads it. A changed component or interface list re-plans the asset (class-defaults key `abfc:structure`). Misuse is ABFC2105.
 - `message(obj, I_X_C).Fn(...)` calls an interface function on any object (a Blueprint Message node, no cast; an object without the interface ignores it).
 - Field defaults and component props are set by their Unreal name, then by the Python name Unreal derives from it (`bHiddenInGame` -> `hidden_in_game`).
