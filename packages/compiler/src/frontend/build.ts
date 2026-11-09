@@ -1870,6 +1870,18 @@ class HirBuilder {
       if (!o) return f.fail("ABFC2099", `${local.name} has no output "${name}"`, node.name);
       return { k: "out", call: obj, pin, type: o.type, span: sp };
     }
+    // `Lib.Fn(...).Out`: an output read straight off a call (no const needed); a call with exec outputs still needs its
+    // const, because the next statement branches on `.exec`
+    const direct = obj.type === "result" ? this.callInfo.get(obj) : undefined;
+    if (direct) {
+      if (direct.execOutputs !== null) {
+        return f.fail("ABFC2052", "the result of a function with exec outputs must be stored in a const and branched by the next statement", node);
+      }
+      const pin = direct.pinOfTs.get(name) ?? name;
+      const o = direct.outs.find((x) => x.pin === pin);
+      if (!o) return f.fail("ABFC2099", `${direct.name} has no output "${name}"`, node.name);
+      return { k: "out", call: obj, pin, type: o.type, span: sp };
+    }
 
     const recvType = this.checker.getTypeAtLocation(recv);
     const structPath = this.structPathOf(recvType);

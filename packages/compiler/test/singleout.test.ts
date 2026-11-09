@@ -47,6 +47,9 @@ export class BP_Overlap extends Actor {
     const o = box.GetOverlappingActors(Actor);
     return o.OverlappingActors.length > 0;
   }
+  private Direct(box: Box): boolean {
+    return box.GetOverlappingActors(Actor).OverlappingActors.length > 0;
+  }
   private Empty(box: Box): boolean {
     return box.Trace([]);
   }
@@ -79,7 +82,8 @@ function irOf(): IrModule {
 test("a call whose only output is an out parameter is a result read through that pin (as the stubs type it)", () => {
   const ir = irOf();
   const asset = ir.assets.find((a) => a.path.endsWith("BP_Overlap"))!;
-  for (const id of ["function:Anyone", "function:Store"]) {
+  // Direct reads the output straight off the call (no const): the same nodes and wires as Anyone
+  for (const id of ["function:Anyone", "function:Store", "function:Direct"]) {
     const u = asset.units.find((x) => x.id === id)!;
     const named = (fn: string) => u.nodes.find((n) => (n.t3d.props ?? []).some((p) => p.includes(`MemberName="${fn}"`)));
     const call = named("GetOverlappingActors")!;
