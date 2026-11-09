@@ -121,6 +121,8 @@ export type HirExpr = (
       outs: Array<{ pin: string; type: BpType }>;
       /** `super.X(...)` in the override X: a Call Parent Function node (owner = the parent class). */
       parentCall?: true;
+      /** `message(obj, I_X_C).Fn(...)`: an interface Message node (K2Node_Message); `target` is the object messaged. */
+      message?: true;
     }
   | { k: "cast"; value: HirExpr; target: string; castPin: string }
   | { k: "optional"; value: HirExpr; then: HirExpr } // a?.b : `then` refers to value via { k: "hole" }

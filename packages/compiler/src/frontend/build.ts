@@ -2109,6 +2109,7 @@ class HirBuilder {
       if (rt === "createWidget") return this.createWidgetExpr(node, sp);
       if (rt === "getWorldSubsystem") return this.subsystemExpr(node, sp);
       if (rt === "spawnActor") return this.spawnExpr(node, sp);
+      if (rt === "message") return f.fail("ABFC2099", "message(obj, Interface) is only valid as the target of a call of an interface function: message(obj, I_X_C).Fn(...)", node);
       if (callee.text === "eval") return f.fail("ABFC2020", "eval is not supported", node);
       return f.fail("ABFC2099", `call of "${callee.text}" is not supported`, node);
     }
@@ -2169,7 +2170,17 @@ class HirBuilder {
     }
 
     let target: HirExpr | null = null;
-    if (fi.static) {
+    // `message(obj, I_X_C).Fn(...)`: a Message node whose self pin is obj (no cast; a non-implementer ignores it)
+    const msg = ts.isCallExpression(callee.expression) && runtimeName(this.checker, callee.expression) === "message" ? callee.expression : undefined;
+    if (msg) {
+      const [objArg, ifArg] = msg.arguments;
+      const ci = this.classArg(ifArg);
+      if (msg.arguments.length !== 2 || !objArg || !ci || ci.kind !== "class") return f.fail("ABFC2099", "message(obj, Interface) takes an object and an interface class from the stubs", msg);
+      if (fi.owner !== ci.path) return f.fail("ABFC2099", `${fi.name} is not a function of ${ci.path}`, callee.name);
+      if (fi.static || fi.pure) return f.fail("ABFC2099", `${fi.name} cannot be messaged (static or pure)`, callee.name);
+      this.classMeta[ci.path] = ci.meta;
+      target = this.expr(objArg);
+    } else if (fi.static) {
       const ns = this.checker.getSymbolAtLocation(callee.expression);
       if (ns) this.noteSymbol(resolveAlias(this.checker, ns));
     } else if (callee.expression.kind !== ts.SyntaxKind.ThisKeyword) {
@@ -2204,6 +2215,7 @@ class HirBuilder {
       args,
       outs: fi.outs,
       type,
+      ...(msg ? { message: true as const } : {}),
       span: sp,
     };
     this.callInfo.set(out, fi);

@@ -113,3 +113,32 @@ test("a backend without bp_apply feature interfaces fails the build before the s
   assert.ok(featureGates(ir!, caps).some((d) => d.code === "ABFC2044" && /feature interfaces/.test(d.message)));
   assert.ok(!featureGates(ir!, { ...caps, interfaces: true }).some((d) => d.code === "ABFC2044"));
 });
+
+test("message(obj, I_X_C).Fn(...) is a K2Node_Message naming the interface, its self pin wired to obj", () => {
+  const body = `  @event
+  Poke(Other: Actor | null): void {
+    if (message(Other, I_FakeUse_C).CanUse_A()) message(Other, I_FakeUse_C).Use_A(this);
+  }
+`;
+  const { ir, diagnostics } = build(SOURCE("", body).replace("import { blueprint, override }", "import { blueprint, event, message, override }").replace(/  @override\n  Use_A[\s\S]*?\n  }\n  @override\n  CanUse_A[\s\S]*?\n  }\n/, ""));
+  assert.deepEqual(diagnostics, []);
+  const poke = ir!.assets[0]!.units.find((u) => u.name === "Poke")!;
+  const msgs = poke.nodes.filter((n) => n.t3d.class === "/Script/BlueprintGraph.K2Node_Message");
+  assert.equal(msgs.length, 2);
+  for (const m of msgs) {
+    assert.equal(m.sem, undefined);
+    assert.ok(m.t3d.props.some((p) => p.includes(`MemberParent="/Script/Engine.BlueprintGeneratedClass'${IFACE}'"`)), m.t3d.props.join(" "));
+    assert.ok(poke.wires.some(([, to]) => to === `${m.id}.self`), JSON.stringify(poke.wires));
+  }
+});
+
+test("message(...) outside a call target is refused", () => {
+  const body = `  @event
+  Poke(Other: Actor | null): void {
+    const x = message(Other, I_FakeUse_C);
+    void x;
+  }
+`;
+  const { diagnostics } = build(SOURCE("", body).replace("import { blueprint, override }", "import { blueprint, event, message, override }").replace(/  @override\n  Use_A[\s\S]*?\n  }\n  @override\n  CanUse_A[\s\S]*?\n  }\n/, ""));
+  assert.ok(diagnostics.some((d) => /only valid as the target/.test(d.message)), JSON.stringify(diagnostics.map((d) => d.message)));
+});

@@ -103,6 +103,12 @@ export declare function override(m: (this: any, ...a: any[]) => void, ctx: Class
 export declare function createWidget<T>(cls: abstract new (...a: never[]) => T, owningPlayer: object | null): T;
 export declare function spawnActor<T>(cls: abstract new (...a: never[]) => T, opts?: SpawnOptions): T;
 /**
+ * Calls an interface function on any object (Blueprint interface "Message" node): `message(actor, I_Interactable_C).InteractWith_A(me, null)`.
+ * Nothing happens (and outputs are defaults) when the object does not implement the interface; no cast is needed. Only as the
+ * target of a call of one of the interface's functions.
+ */
+export declare function message<T>(target: object | null, iface: abstract new (...a: never[]) => T): T;
+/**
  * A hard reference to an existing asset (mesh, material, sound, data asset): `asset(StaticMesh, "@mod/Meshes/SM_Crate")` or
  * `asset(SoundBase, "/Game/Audio/S_Beep")`. Only as an argument of a call: it becomes that pin's default object, so the
  * asset cooks with the Blueprint and needs no load node. The path is a string literal; `@mod/` means the mod being built.
