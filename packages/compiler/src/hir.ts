@@ -145,7 +145,7 @@ export type HirExpr = (
   /** `getWorldSubsystem(Class)`: a pure Get Subsystem node of the native world subsystem `cls`. */
   | { k: "subsystem"; cls: string }
   /** `transform`: the SpawnTransform (absent: identity). */
-  | { k: "spawn"; cls: string; owner?: HirExpr; transform?: HirExpr; collision?: string; scale?: string }
+  | { k: "spawn"; cls: string; owner?: HirExpr; instigator?: HirExpr; transform?: HirExpr; collision?: string; scale?: string }
   | { k: "arith"; op: "+" | "-" | "*" | "/"; kind: "int" | "real"; a: HirExpr; b: HirExpr }
   | { k: "cmp"; op: "<" | "<=" | ">" | ">="; kind: "int" | "real"; a: HirExpr; b: HirExpr }
   | { k: "index"; array: HirExpr; index: HirExpr; elem: BpType }

@@ -525,6 +525,7 @@ export class UnitBuilder {
       }
       case "spawn": {
         const owner = e.owner ? this.optOperand(e.owner) : undefined;
+        const instigator = e.instigator ? this.optOperand(e.instigator) : undefined;
         const where = e.transform ? this.operand(e.transform) : undefined;
         const mk = where
           ? undefined
@@ -539,8 +540,9 @@ export class UnitBuilder {
         if (where) this.feed(where, id, "SpawnTransform", defaults);
         else this.link(`${mk}.${P.returnValue}`, `${id}.SpawnTransform`);
         if (owner) this.feed(owner, id, "Owner", defaults);
+        if (instigator) this.feed(instigator, id, "Instigator", defaults);
         this.settle(id, defaults);
-        return { pin: `${id}.${P.returnValue}`, nulls: [...(owner?.nulls ?? []), ...(where?.nulls ?? [])] };
+        return { pin: `${id}.${P.returnValue}`, nulls: [...(owner?.nulls ?? []), ...(instigator?.nulls ?? []), ...(where?.nulls ?? [])] };
       }
       case "arith":
       case "cmp": {

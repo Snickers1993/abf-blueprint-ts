@@ -12,7 +12,7 @@ const here = fileURLToPath(new URL("./", import.meta.url));
 const phase2Dir = fileURLToPath(new URL("../../test/fixtures/phase2", import.meta.url));
 const profile = JSON.parse(readFileSync(fileURLToPath(new URL("../../../env/profiles/ue5.4.4-1050002.json", import.meta.url)), "utf8")) as Profile;
 
-// A parent with overridable functions that return values, as Abiotic_Weapon_ParentBP_C:Local_FirePressed.
+// A parent with overridable functions that return values, like a game weapon parent's fire handler.
 const STUB = `import type { int } from "@abfc/runtime";
 import { Actor } from "/Script/FakeEngine";
 /**

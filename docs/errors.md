@@ -483,7 +483,7 @@ Severity: error · Exit: 1 (a field that cannot be declared as written); warning
 
 Meaning: an own field cannot be declared as written (error), or the type of an own field the asset already has was changed (warning: the build removes the variable and creates it again with the new type, and applies every unit of the class again because their get and set nodes carry the old type).
 
-Typical cause: an initializer that is not a literal of the field type (or a default on a struct, object, array, Map, Set or text field, or an integer out of range for its type), `!` together with an initializer, a modifier other than `public`, a type without a Blueprint equivalent, a name that collides with an inherited member; or changing `Hits!: int;` to `Hits!: float;`.
+Typical cause: an initializer that is not a literal of the field type (a struct, object, class, array or text field also takes `asset(Class, "path")`, a class, `null`, a native struct literal or an array literal of those; a Map or Set field takes no default; an integer out of range for its type), `!` together with an initializer, a modifier other than `public`, a type without a Blueprint equivalent, a name that collides with an inherited member; or changing `Hits!: int;` to `Hits!: float;`.
 
 Fix: for the error, declare the field as `Name!: Type;` or `Name: Type = <literal>;` (a number, `true`/`false`, a string or an enum value of the field type) with a supported type and a free name. For the warning nothing is required; values set on placed instances of the class are reset, and hand-made nodes (a class that merges with a `_Manual` interface) that use the variable may fail Unreal's compile (ABFC6001 names them).
 
@@ -591,11 +591,7 @@ Fix: remove the option, or derive from Actor.
 
 Severity: error · Exit: 1
 
-Meaning: the `@blueprint` option `tickEnabled` is not supported yet.
-
-Typical cause: setting `tickEnabled: true` or `false`.
-
-Fix: remove the option and set tick on the class in the Mod Editor. Writing the saved start-with-tick default has not been verified.
+Retired: `tickEnabled` is supported now (the class-defaults pass writes PrimaryActorTick.bStartWithTickEnabled). abfc no longer reports this code.
 
 ### ABFC2064
 

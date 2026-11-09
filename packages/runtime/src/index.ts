@@ -16,7 +16,8 @@ export type name = string & { readonly __bpString?: "name" };
  */
 export type text = string & { readonly __bpString?: "text" };
 
-export type TSubclassOf<T> = { readonly __bpClassOf?: T };
+/** A class reference. A field of this type may be initialized with the class itself (`Pot: TSubclassOf<BP_Pot_C> = BP_Pot_C`). */
+export type TSubclassOf<T> = { readonly __bpClassOf?: T } | (abstract new (...a: never[]) => T);
 export type TSoftObjectPtr<T> = { readonly __bpSoftObjectOf?: T };
 export type TSoftClassPtr<T> = { readonly __bpSoftClassOf?: T };
 
@@ -57,7 +58,7 @@ export interface BlueprintOptions {
   netUpdateFrequency?: number;
   minNetUpdateFrequency?: number;
   tickInterval?: number;
-  /** Not supported yet (ABFC2063): writing the saved bStartWithTickEnabled is unverified. */
+  /** Start with tick enabled (PrimaryActorTick.bStartWithTickEnabled); an Actor only. Written by the class-defaults pass. */
   tickEnabled?: boolean;
   /** row asset path, verified (Phase 2) @deprecated Use `@director("RowName")`. */
   classManagerRow?: string;

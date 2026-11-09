@@ -627,7 +627,6 @@ test("own field initializers: literals become the variable default; other initia
     `Huge: int = 3000000000;`,
     `Flag: boolean = 1;`,
     `Str: string = 3;`,
-    `Names: name[] = [];`,
     `Bang!: int = 1;`,
     `Bare: int;`,
   ];

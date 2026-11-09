@@ -287,6 +287,20 @@ function withoutNullish(checker: ts.TypeChecker, type: ts.Type): ts.Type {
   return checker.getNonNullableType(type);
 }
 
+/** `TSubclassOf<T>` / `TSoftClassPtr<T>` / `TSoftObjectPtr<T>` (alone, or in a union with the class constructor) -> `class:` / `softclass:` / `softobject:`. */
+function classRefType(checker: ts.TypeChecker, t: ts.Type): BpType | undefined {
+  for (const m of t.isUnion() ? t.types : [t]) {
+    for (const [prop, kind] of [["__bpClassOf", "class"], ["__bpSoftClassOf", "softclass"], ["__bpSoftObjectOf", "softobject"]] as const) {
+      const p = checker.getPropertyOfType(m, prop);
+      if (!p) continue;
+      const inner = checker.getNonNullableType(checker.getTypeOfSymbol(p)).getSymbol();
+      const ci = inner ? classInfo(inner) : undefined;
+      if (ci && ci.kind !== "struct" && ci.kind !== "enum") return `${kind}:${ci.path}`;
+    }
+  }
+  return undefined;
+}
+
 /**
  * Blueprint type of a TypeScript type: flavors (`__bpNumber`, `__bpString`, `__bpEnum`), booleans, Blueprint classes and structs
  * (`@bpPath`), arrays. undefined when the type has no Blueprint meaning (plain `number`, unions of classes, ...).
@@ -315,6 +329,8 @@ export function bpTypeOf(checker: ts.TypeChecker, type: ts.Type): BpType | undef
   const en = literalOfProperty(checker, t, "__bpEnum");
   if (en !== undefined) return `enum:${en}`;
   if (t.flags & ts.TypeFlags.StringLike) return "string";
+  const ref = classRefType(checker, t);
+  if (ref !== undefined) return ref;
   const sym = t.getSymbol();
   if (sym) {
     const ci = classInfo(sym);

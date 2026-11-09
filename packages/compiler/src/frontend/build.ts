@@ -20,13 +20,26 @@ const ACTOR_COMPONENT = "/Script/Engine.ActorComponent";
 const NUMERIC = new Set(["int", "int64", "byte", "float", "double", "real"]);
 const STRINGY = new Set(["name", "text", "string"]);
 /** `@blueprint` options that set class defaults (applied by the class-defaults pass). */
-const CLASS_OPTIONS = new Set(["replicates", "alwaysRelevant", "onlyRelevantToOwner", "netUpdateFrequency", "minNetUpdateFrequency", "tickInterval", "kind"]);
+const CLASS_OPTIONS = new Set(["replicates", "alwaysRelevant", "onlyRelevantToOwner", "netUpdateFrequency", "minNetUpdateFrequency", "tickInterval", "tickEnabled", "kind"]);
 /** Boolean class options -> class default (T3D property name). */
 const BOOL_DEFAULTS: Record<string, string> = {
   replicates: "bReplicates",
   alwaysRelevant: "bAlwaysRelevant",
   onlyRelevantToOwner: "bOnlyRelevantToOwner",
+  /** PrimaryActorTick.bStartWithTickEnabled (written through the tick struct by the class-defaults pass). */
+  tickEnabled: "bStartWithTickEnabled",
 };
+/** Field types whose default is written on the class default object (class-defaults pass), not as the variable's default text. */
+const CDO_FIELD_TYPE = /^(struct:|object:|class:|softobject:|softclass:|array:|text$)/;
+/** A field default for the class-defaults pass (JSON; read by the fixed Python template, never pasted as code). */
+type CdoValue =
+  | { k: "none" }
+  | { k: "bool"; v: boolean }
+  | { k: "num"; v: number }
+  | { k: "str" | "name" | "text"; v: string }
+  | { k: "asset" | "class"; path: string }
+  | { k: "struct"; name: string; fields: Record<string, CdoValue> }
+  | { k: "array"; items: CdoValue[] };
 /** Number class options -> class default (T3D property name). */
 const NUMBER_DEFAULTS: Record<string, string> = {
   netUpdateFrequency: "NetUpdateFrequency",
@@ -34,7 +47,7 @@ const NUMBER_DEFAULTS: Record<string, string> = {
   tickInterval: "TickInterval",
 };
 /** Class options that only exist on an Actor (the parent chain must reach `/Script/*.Actor`). */
-const ACTOR_ONLY_OPTIONS = new Set(["alwaysRelevant", "onlyRelevantToOwner", "netUpdateFrequency", "minNetUpdateFrequency", "tickInterval"]);
+const ACTOR_ONLY_OPTIONS = new Set(["alwaysRelevant", "onlyRelevantToOwner", "netUpdateFrequency", "minNetUpdateFrequency", "tickInterval", "tickEnabled"]);
 const ARRAY_OWN_ONLY = "an array can only be changed as a statement on an own array variable: this.<Array>.push(x), this.<Array>.splice(i, 1) or this.<Array>.length = 0";
 const CONTAINERS = new Set(["Map", "Set", "WeakMap", "WeakSet", "ReadonlyMap", "ReadonlySet"]);
 const CONTAINER_OWN_ONLY = "a Map or Set can only be used through an own field: this.<Field>.set(k, v), this.<Field>.has(k), this.<Field>.size, ...";
@@ -129,7 +142,7 @@ function children(e: HirExpr): HirExpr[] {
     case "length": return [e.array];
     case "callOwn": return e.args.map((a) => a.value);
     case "createWidget": return [e.owner];
-    case "spawn": return [...(e.owner ? [e.owner] : []), ...(e.transform ? [e.transform] : [])];
+    case "spawn": return [...(e.owner ? [e.owner] : []), ...(e.instigator ? [e.instigator] : []), ...(e.transform ? [e.transform] : [])];
     case "arith": return [e.a, e.b];
     case "cmp": return [e.a, e.b];
     case "index": return [e.array, e.index];
@@ -306,13 +319,7 @@ class HirBuilder {
           classManagerRow = lit;
           classManagerRowNode = p;
         }
-        else if (key === "tickEnabled") {
-          this.sink.error(
-            "ABFC2063",
-            `@blueprint option "tickEnabled" is not supported yet: writing the saved PrimaryActorTick.bStartWithTickEnabled has not been verified in the editor`,
-            p,
-          );
-        } else if (key !== undefined && CLASS_OPTIONS.has(key)) {
+        else if (key !== undefined && CLASS_OPTIONS.has(key)) {
           // class defaults: validated here, applied by the class-defaults pass (design 6.2 pass 5)
           const init = (p as ts.PropertyAssignment).initializer;
           const prop = BOOL_DEFAULTS[key] ?? NUMBER_DEFAULTS[key];
@@ -790,10 +797,99 @@ class HirBuilder {
     }
     let def: string | undefined;
     if (m.initializer !== undefined) {
-      def = this.fieldDefault(m.initializer, type, shown);
-      if (def === undefined) return undefined;
+      if (CDO_FIELD_TYPE.test(type)) {
+        // struct, object, class, array and text defaults: written on the class default object by the class-defaults pass
+        let v: CdoValue;
+        try {
+          v = this.cdoValue(m.initializer, type, shown);
+        } catch (e) {
+          if (e instanceof Fail) return undefined;
+          throw e;
+        }
+        this.cls.defaults[`field:${m.name.text}`] = JSON.stringify(v);
+      } else {
+        def = this.fieldDefault(m.initializer, type, shown);
+        if (def === undefined) return undefined;
+      }
     }
     return { name: m.name.text, type, ...(def !== undefined ? { default: def } : {}), span: this.sp(m.name) };
+  }
+
+  /**
+   * The value of a struct, object, class, array or text field initializer, for the class-defaults pass: literals, `asset(Class, path)`,
+   * a class, `null`, a native struct literal and an array literal of those. Anything else fails with ABFC2047.
+   */
+  private cdoValue(init: ts.Expression, type: BpType, shown: string): CdoValue {
+    const f: DiagSink = this.sink;
+    const e = stripParens(init);
+    const bad = (what: string): never =>
+      f.fail("ABFC2047", `field ${shown}: ${what}. A ${type} default can be a literal, asset(Class, "path"), a class, null, a struct literal of a native struct, or an array literal of those`, init);
+    if (e.kind === ts.SyntaxKind.NullKeyword) {
+      if (/^(object|class|softobject|softclass):/.test(type)) return { k: "none" };
+      return bad("null is only a default of an object or class field");
+    }
+    if (type.startsWith("array:")) {
+      if (!ts.isArrayLiteralExpression(e)) return bad("an array field takes an array literal");
+      const elem = type.slice("array:".length);
+      return { k: "array", items: e.elements.map((x) => this.cdoValue(x, elem, shown)) };
+    }
+    let num: number | undefined;
+    if (ts.isNumericLiteral(e)) num = Number(e.text);
+    else if (ts.isPrefixUnaryExpression(e) && e.operator === ts.SyntaxKind.MinusToken && ts.isNumericLiteral(stripParens(e.operand))) num = -Number((stripParens(e.operand) as ts.NumericLiteral).text);
+    const str = ts.isStringLiteral(e) || ts.isNoSubstitutionTemplateLiteral(e) ? e.text : undefined;
+    if (type === "bool") {
+      if (e.kind === ts.SyntaxKind.TrueKeyword || e.kind === ts.SyntaxKind.FalseKeyword) return { k: "bool", v: e.kind === ts.SyntaxKind.TrueKeyword };
+      return bad("expected true or false");
+    }
+    if (NUMERIC.has(type)) {
+      if (num === undefined || !Number.isFinite(num)) return bad("expected a number literal");
+      if ((type === "int" || type === "int64" || type === "byte") && !Number.isInteger(num)) return bad(`expected an integer for ${type}`);
+      return { k: "num", v: num };
+    }
+    if (type === "string" || type === "text") {
+      if (str === undefined) return bad("expected a string literal");
+      return { k: type === "text" ? "text" : "str", v: str };
+    }
+    if (type === "name") {
+      if (str !== undefined) return { k: "name", v: str };
+      if (ts.isCallExpression(e) && runtimeName(this.checker, e) === "nameOf") {
+        const a0 = e.arguments[0];
+        if (a0 && (ts.isStringLiteral(a0) || ts.isNoSubstitutionTemplateLiteral(a0))) return { k: "name", v: a0.text };
+      }
+      return bad("expected a string literal or nameOf(\"...\")");
+    }
+    if (/^(object|softobject):/.test(type)) {
+      if (ts.isCallExpression(e) && runtimeName(this.checker, e) === "asset") {
+        const ref = this.assetExpr(e, this.sp(e));
+        if (ref.k !== "assetRef") return bad("expected asset(Class, path)");
+        const q = ref.text.indexOf("'");
+        return { k: "asset", path: ref.text.slice(q + 1, -1) };
+      }
+      return bad("an object field takes asset(Class, \"path\") or null (an instance cannot be a class default)");
+    }
+    if (/^(class|softclass):/.test(type)) {
+      const ci = this.classArg(e);
+      if (!ci || ci.kind !== "class") return bad("expected a class");
+      this.classMeta[ci.path] = ci.meta;
+      return { k: "class", path: ci.path };
+    }
+    if (type.startsWith("struct:")) {
+      const path = type.slice("struct:".length);
+      const m = /^\/Script\/[A-Za-z0-9_]+\.([A-Za-z0-9_]+)$/.exec(path);
+      if (!m) return bad("only native (/Script) structs can be written as a class default; set a mod struct in the editor or in Begin Play");
+      if (!ts.isObjectLiteralExpression(e)) return bad("a struct field takes an object literal");
+      const fields: Record<string, CdoValue> = {};
+      for (const p of e.properties) {
+        if (!ts.isPropertyAssignment(p) || !(ts.isIdentifier(p.name) || ts.isStringLiteral(p.name))) return bad("only `Field: value` entries are supported in a struct default");
+        const ctx = this.checker.getContextualType(e);
+        const sym = ctx ? this.checker.getPropertyOfType(ctx, p.name.text) : undefined;
+        const ft = (sym ? bpTypeOfMember(sym) : undefined) ?? (sym ? bpTypeOf(this.checker, this.checker.getTypeOfSymbolAtLocation(sym, e)) : undefined);
+        if (ft === undefined) return bad(`struct field ${p.name.text} has no Blueprint type`);
+        fields[p.name.text] = this.cdoValue(p.initializer, ft, `${shown}.${p.name.text}`);
+      }
+      return { k: "struct", name: m[1]!, fields };
+    }
+    return bad("this field type has no class default form");
   }
 
   /** The Unreal default-value text of an own field's literal initializer, or undefined (after reporting ABFC2047/ABFC2015) when it is not a literal of the field type. */
@@ -978,8 +1074,10 @@ class HirBuilder {
       return undefined;
     }
     const fparams = fi.params.map((p) => ({ name: p.pin, type: p.type }));
-    if (fi.outs.length > 0) {
-      // a parent function with outputs is overridden by a function graph (its entry and result nodes name the parent), not by an event
+    // A parent function with outputs is overridden by a function graph (its entry and result nodes name the parent), not by an
+    // event. So is every member a Blueprint class declares: what a child can override there is a function graph (a weapon's
+    // GunStartFiring), and an event node for it comes out of the apply as a custom event GunStartFiring_1 (ABFC6003, 9 Nov PC run).
+    if (fi.outs.length > 0 || !fi.owner.startsWith("/Script/")) {
       if (fi.execOutputs !== null) {
         this.sink.error("ABFC2099", `@override ${name}: overriding a parent function with exec outputs is not supported`, m.name);
         return undefined;
@@ -1905,13 +2003,13 @@ class HirBuilder {
     return { k: "getOn", obj, owner: mp.owner, name: mp.name, type, span: sp };
   }
 
-  private classArg(arg: ts.Expression | undefined): { path: string; meta: string; castPin: string | null; sym: ts.Symbol } | undefined {
+  private classArg(arg: ts.Expression | undefined): { path: string; meta: string; castPin: string | null; sym: ts.Symbol; kind: "class" | "struct" | "enum" } | undefined {
     if (!arg) return undefined;
     const s = this.checker.getSymbolAtLocation(arg);
     if (!s) return undefined;
     const sym = resolveAlias(this.checker, s);
     const ci = classInfo(sym);
-    return ci ? { path: ci.path, meta: ci.meta, castPin: ci.castPin, sym } : undefined;
+    return ci ? { path: ci.path, meta: ci.meta, castPin: ci.castPin, sym, kind: ci.kind } : undefined;
   }
 
   /**
@@ -2149,6 +2247,7 @@ class HirBuilder {
     if (!ci) return f.fail("ABFC2060", "the spawned class has no Blueprint metadata (@bpPath)", clsArg);
     this.classMeta[ci.path] = ci.meta;
     let owner: HirExpr | undefined;
+    let instigator: HirExpr | undefined;
     let transform: HirExpr | undefined;
     let collision: string | undefined;
     let scale: string | undefined;
@@ -2168,14 +2267,15 @@ class HirBuilder {
           if (text === undefined) return f.fail("ABFC2056", `spawnActor option ${key} must be a string literal (the enum text)`, init);
           if (key === "collisionHandlingOverride") collision = text;
           else scale = text;
-        } else if (key === "instigator") return f.fail("ABFC2056", "spawnActor option instigator is not supported yet", p);
-        else return f.fail("ABFC2056", `unknown spawnActor option "${key}" (owner, transform, collisionHandlingOverride, transformScaleMethod)`, p.name);
+        } else if (key === "instigator") instigator = this.expr(init);
+        else return f.fail("ABFC2056", `unknown spawnActor option "${key}" (owner, instigator, transform, collisionHandlingOverride, transformScaleMethod)`, p.name);
       }
     }
     return {
       k: "spawn",
       cls: ci.path,
       ...(owner ? { owner } : {}),
+      ...(instigator ? { instigator } : {}),
       ...(transform ? { transform } : {}),
       ...(collision !== undefined ? { collision } : {}),
       ...(scale !== undefined ? { scale } : {}),
