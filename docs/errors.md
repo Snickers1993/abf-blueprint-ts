@@ -1497,6 +1497,16 @@ Typical cause: the test was written with `test.liveHud`.
 
 Fix: nothing is required. abfc lists the test and its checklist in `.abfc/reports/manual-checks.md` for a manual check in Play In Editor. Skipped live tests do not stop `abfc publish`.
 
+### ABFC6106
+
+Severity: warning · Exit: -
+
+Meaning: the backend runs no `until` steps, so `t.waitUntil(...)` waits its whole timeout and then looks once.
+
+Typical cause: the backend lacks the `game_test_until` extension (backend patch `backend-game-test-until.patch`).
+
+Fix: nothing is required: the test still passes when the condition holds at the end of the timeout. A condition that holds only for a moment (a flag that is set and cleared again) needs the patch; apply it and restart the backend.
+
 ### ABFC6201
 
 Severity: warning · Exit: -

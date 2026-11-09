@@ -226,4 +226,13 @@ export interface ApplyPlan { mod: string; assets: AssetPlan[] }
 
 export interface TestStepRecord { step: Record<string, unknown>; span: Span; knownIssue?: string }
 /** `liveHud`: the test needs the live HUD (not available hidden); it is skipped and listed with its manual `checklist`. */
-export interface TestCase { name: string; file: string; span: Span; steps: TestStepRecord[]; liveHud?: { checklist: string[] } }
+/** `map`/`timeoutSeconds`: `test(name, { map, timeout }, body)` runs on that map (default the backend's empty map) with that run timeout. */
+export interface TestCase {
+  name: string;
+  file: string;
+  span: Span;
+  steps: TestStepRecord[];
+  liveHud?: { checklist: string[] };
+  map?: string;
+  timeoutSeconds?: number;
+}

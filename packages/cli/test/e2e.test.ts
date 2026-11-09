@@ -2877,3 +2877,36 @@ test("(s7) the backend cannot start at the start of a build: ABFC3020 once with 
     assert.doesNotMatch(x.out, /ABFC3003|ABFC3001/, "the existing stubs are usable");
   });
 });
+
+test("(h2) test options and waitUntil: map and timeout reach bp_game_test; without game_test_until the wait degrades with ABFC6106", async () => {
+  const body = [
+    'import { test } from "@abfc/testkit";',
+    'import { BP_Relay } from "./Relay.js";',
+    "",
+    'test("relay settles", { map: "/Game/Maps/Facility", timeout: 400 }, (t) => {',
+    "  const a = t.find(BP_Relay, { timeout: 60 });",
+    "  const b = t.spawn(BP_Relay);",
+    "  a.moveTo(0, 0, 100);",
+    '  b.call("UpdateTarget");',
+    '  t.waitUntil(b.get("Visible"), { timeout: 4 }).equals(false);',
+    "  t.expect(t.distance(a, b)).below(5000);",
+    "});",
+    "",
+  ].join("\n");
+  for (const until of [false, true]) {
+    await withRig(until ? { handMadeEvent: false, extraFeatures: ["game_test_until"] } : { handMadeEvent: false }, async (r) => {
+      assert.equal((await r.run(["build"])).code, 0);
+      rmSync(join(r.dir, "src", "Relay.test.ts"));
+      writeFileSync(join(r.dir, "src", "Settle.test.ts"), body, "utf8");
+      const x = await r.run(["test", "--no-build"]);
+      assert.equal(x.code, 0, x.out);
+      assert.match(x.out, /PASS relay settles \(7\/7/);
+      assert.equal(/warning ABFC6106/.test(x.out), !until, x.out);
+      assert.equal(r.backend.gameTestRuns.length, 1);
+      const run = r.backend.gameTestRuns[0]!;
+      assert.deepEqual(run.o, { timeoutSeconds: 400, map: "/Game/Maps/Facility" });
+      const ops = run.steps.map((s) => (s as { op: string }).op);
+      assert.deepEqual(ops, until ? ["find", "spawn", "python", "call", "until", "python", "assert"] : ["find", "spawn", "python", "call", "wait", "get", "assert", "python", "python"]);
+    });
+  }
+});

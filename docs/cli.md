@@ -166,6 +166,25 @@ Builds (unless `--no-build`), compiles the tests of the project and runs each on
 | `[pattern]` | Run only the tests that match. |
 | `--no-build` | Skip the build; the stubs lock is still checked. |
 
+### Tests in a real map
+
+`test(name, { map, timeout }, body)` runs one test on a game map instead of the empty default (which has no player), with a longer run timeout for the map load. The run uses the backend's own user folder, so no save of yours is read or written. What a test can do:
+
+| In a test | Step |
+| --- | --- |
+| `t.spawn(Class)` | spawns an actor (at the origin) |
+| `t.find(Class, { timeout })` | the first actor of the class in the world, waited for (the player: `t.find(Abiotic_PlayerCharacter_C)`) |
+| `h.call("Fn", ...)`, `h.get("Var")`, `h.set("Var", v)` | calls a function or event, reads or writes a variable |
+| `h.moveTo(x, y, z)`, `h.moveTo(other)`, `h.aim(pitch, yaw)` | teleports an actor; turns it and its controller's view (the player's camera follows) |
+| `t.distance(a, b)` | the distance between two actors (cm) |
+| `t.wait(s)`, `t.python(code)` | waits; runs Python in the game (`ctx[name]` holds the values, `result` is the value) |
+| `t.expect(v).equals / approx / contains / truthy / notNone / below / above` | checks a value once |
+| `t.waitUntil(v, { timeout, every }).equals(...)` | looks at an inline `h.get`, `h.call`, `t.distance` or `t.python` again and again until the check holds; fails after `timeout` (default 10 s) |
+
+A top-level `const NAME = "..."` (or a backtick string without `${}`) of a test file can stand wherever a test takes text, such as `t.python(NAME)`. Read state back (a `Step` variable, a flag) instead of PrintString, which is compiled out of the game build.
+
+`t.waitUntil` polls on a backend with the `game_test_until` extension (backend patch `docs/backend-patches/backend-game-test-until.patch`, which also lets a big map take most of the timeout to load). On an older backend it waits the whole timeout, then looks once, with warning [ABFC6106](errors.md#abfc6106).
+
 `test --json` result: `{tests: [{name, passed, ok, steps, seconds}], manualChecks?}`; each manual check is `{name, file, line, checklist}`. When the build ran and was up to date or applied, the test result replaces the build result in the document. A failed test is [ABFC6104](errors.md#abfc6104) (exit 1).
 
 ## abfc status

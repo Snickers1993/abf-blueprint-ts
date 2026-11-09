@@ -122,6 +122,8 @@ export interface FakeBackendOptions {
    * /Script/) comes out as a custom event named `<function>_1`, as Unreal turns an event the Actor template scratch cannot resolve.
    */
   overrideAsCustomEvent?: boolean;
+  /** Extra `abfc_extensions` features, e.g. "game_test_until". */
+  extraFeatures?: string[];
   /** The initial asset holds a hand-made `UpdateTarget` event (default true). */
   handMadeEvent?: boolean;
   /** `staging_sync` with discardChanges (a resync) fails; the first sync of a missing stage still works (default false). */
@@ -392,6 +394,8 @@ export class FakeBackend implements Backend {
   /** Per `bp_game_test` call (in order, counted from `gameTestCalls`): the step indexes that fail. */
   gameTestFailures: number[][] = [];
   gameTestCalls = 0;
+  /** What each `bp_game_test` call sent. */
+  gameTestRuns: Array<{ steps: unknown[]; o: { timeoutSeconds: number; map?: string } }> = [];
   auditOk = true;
   /** A rename or reparent edits the nodes of the asset it renames/reparents (a pin default changes), as Unreal's fixup does (default false). */
   opsEditNodes = false;
@@ -498,7 +502,7 @@ export class FakeBackend implements Backend {
       headlessDir: withInfo ? "C:\\abfc-headless" : null,
       documentsDir: withInfo ? "C:\\Users\\Jane\\Documents" : null,
       headlessDirHasSpace: false,
-      extensions: EXT_FEATURES,
+      extensions: [...EXT_FEATURES, ...(this.options.extraFeatures ?? [])],
       capabilities,
     };
   }
@@ -957,8 +961,9 @@ export class FakeBackend implements Backend {
     return { run: join(this.root, "runs", "catalog"), seconds: 0.1, file: "", data: this.options.catalog };
   }
 
-  async gameTest(_mod: string, steps: unknown[], _o: { timeoutSeconds: number }): Promise<GameTestReport> {
+  async gameTest(_mod: string, steps: unknown[], o: { timeoutSeconds: number; map?: string }): Promise<GameTestReport> {
     this.calls.push({ tool: "bp_game_test" });
+    this.gameTestRuns.push({ steps, o });
     this.lastWarm = false; // the game test always runs cold
     const failing = new Set(this.gameTestFailures[this.gameTestCalls++] ?? []);
     const report = steps.map((s, i) => {

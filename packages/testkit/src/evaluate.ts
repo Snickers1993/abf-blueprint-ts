@@ -25,10 +25,14 @@ const show = (v: unknown): string => {
 };
 
 function expectation(step: Record<string, unknown>): string {
-  if ("equals" in step) return `expected ${show(step.equals)}`;
-  if ("approx" in step) return `expected approx ${show(step.approx)}`;
-  if ("contains" in step) return `expected to contain ${show(step.contains)}`;
-  return "expected a truthy value";
+  const within = step.op === "until" ? ` within ${show(step.timeout)} s` : "";
+  if ("equals" in step) return `expected ${show(step.equals)}${within}`;
+  if ("approx" in step) return `expected approx ${show(step.approx)}${within}`;
+  if ("contains" in step) return `expected to contain ${show(step.contains)}${within}`;
+  if ("below" in step) return `expected below ${show(step.below)}${within}`;
+  if ("above" in step) return `expected above ${show(step.above)}${within}`;
+  if ("not_none" in step) return `expected a value (not None)${within}`;
+  return `expected a truthy value${within}`;
 }
 
 /**
