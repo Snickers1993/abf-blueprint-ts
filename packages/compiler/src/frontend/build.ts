@@ -1182,10 +1182,11 @@ class HirBuilder {
     }
     const fparams = fi.params.map((p) => ({ name: p.pin, type: p.type }));
     // A parent function with outputs is overridden by a function graph (its entry and result nodes name the parent), not by an
-    // event. So is every member a Blueprint class declares: what a child can override there is a function graph (a weapon's
+    // event. So is a member that only a Blueprint class declares: what a child can override there is a function graph (a weapon's
     // GunStartFiring), and an event node for it comes out of the apply as a custom event GunStartFiring_1 (ABFC6003, 9 Nov PC run).
+    // A native event that a Blueprint stub lists again (ReceiveBeginPlay on a game class) stays an event, as before.
     // An interface event without outputs is an event node naming the interface (as the editor's "Implement event" makes it).
-    if (fi.outs.length > 0 || (!viaInterface && !fi.owner.startsWith("/Script/"))) {
+    if (fi.outs.length > 0 || (!viaInterface && !fi.owner.startsWith("/Script/") && !this.nativeDeclares(parentType, name))) {
       if (fi.execOutputs !== null) {
         this.sink.error("ABFC2099", `@override ${name}: overriding a parent function with exec outputs is not supported`, m.name);
         return undefined;
@@ -1202,6 +1203,17 @@ class HirBuilder {
       };
     }
     return { node: m, kind, params: fparams, paramSyms, overrideOf: fi.owner };
+  }
+
+  /** True when a native (/Script) class among the ancestors of `type` declares the member `name` with Blueprint metadata. */
+  private nativeDeclares(type: ts.Type, name: string, seen = new Set<ts.Type>()): boolean {
+    if (seen.has(type)) return false;
+    seen.add(type);
+    const prop = this.checker.getPropertyOfType(type, name);
+    const fi = prop ? functionInfo(prop) : undefined;
+    if (fi?.owner.startsWith("/Script/")) return true;
+    if (!type.isClassOrInterface()) return false;
+    return this.checker.getBaseTypes(type).some((b) => this.nativeDeclares(b, name, seen));
   }
 
   private isHybrid(node: ts.ClassDeclaration): boolean {

@@ -187,3 +187,36 @@ test("super.X() of a parent function with outputs gives its outputs (a value, or
     assert.ok(u.wires.some(([from]) => from === `${parent!.id}.${pin}`), JSON.stringify(u.wires));
   }
 });
+
+test("a native event that a Blueprint stub lists again (ReceiveBeginPlay on a game class) stays an override event", () => {
+  const dir = mkdtempSync(join(here, "ovnative-"));
+  try {
+    cpSync(phase2Dir, dir, { recursive: true });
+    for (const f of ["Phase2Bad.ts", "Counter.ts", "Director.ts"]) rmSync(join(dir, "src", f));
+    writeFileSync(join(dir, ".abfc", "stubs", "test", "Game", "Fake", "BP_FakeGun.d.ts"), GAME_STUB.replace("  StartFiring(): void;", `  StartFiring(): void;
+  /**
+   * @bpPath /Game/Fake/BP_FakeGun.BP_FakeGun_C:ReceiveBeginPlay
+   */
+  ReceiveBeginPlay(): void;`), "utf8");
+    writeFileSync(join(dir, "src", "Gun.ts"), `import { blueprint, override } from "@abfc/runtime";
+import { BP_FakeGun_C } from "/Game/Fake/BP_FakeGun";
+@blueprint({ path: "/TestMod/Gun/BP_Gun" })
+export class BP_Gun extends BP_FakeGun_C {
+  Ready: boolean = false;
+  @override
+  override ReceiveBeginPlay(): void {
+    this.Ready = true;
+  }
+}
+`, "utf8");
+    const loaded = loadProgram(dir);
+    assert.deepEqual(loaded.diagnostics, []);
+    const hir = buildHir(loaded, { mod: "TestMod" }, profile);
+    assert.deepEqual(hir.diagnostics, []);
+    const u = lower(hir, profile).assets[0]!.units.find((x) => x.name === "ReceiveBeginPlay")!;
+    assert.equal(u.kind, "override");
+    assert.equal(u.graph, "EventGraph");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
