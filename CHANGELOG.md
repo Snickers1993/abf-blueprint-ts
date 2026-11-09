@@ -18,6 +18,7 @@ abfc uses semantic versioning for its command-line surface: the commands, their 
 - `bindEvent(source, "Dispatcher", target, "Function")` binds another object's function or event to an object's event dispatcher (Add Delegate fed by Create Event), as a hand-made "Bind Event to ..." does.
 - `bindEvent(source, "Dispatcher", this, "OwnEvent")` binds an own `@event` through its delegate pin (Add Delegate only, no Create Event node).
 - `super.X(...)` inside `@override X` calls the parent's implementation (a Call Parent Function node), e.g. `super.ReceiveBeginPlay()` in a child of a game Blueprint that has its own Begin Play.
+- `[]` as the argument of an array input leaves the pin unwired, which Blueprint reads as an empty array (`LineTraceSingle(..., [], ...)` for ActorsToIgnore).
 - A `Vector`, `Vector2D` or `Rotator` literal whose fields are all numbers, fed straight into a pin, is the pin's default text (no make node): a spawn at a literal place is two nodes.
 - Stubs of hand-made actors list the components they add themselves (`readonly Car: SceneComponent`, tagged `@bpComponent`), from the `components` of `bp_read`; inherited and native components still come from the parent's stub. Run `abfc generate --refresh` once to pick them up.
 - `/` on real values lowers to `Divide_DoubleDouble` (it was ABFC2099). `/` on integers stays ABFC2010 (use `idiv`).

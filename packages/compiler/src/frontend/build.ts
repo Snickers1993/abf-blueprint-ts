@@ -1980,6 +1980,8 @@ class HirBuilder {
         if (p.default === undefined) f.fail("ABFC2099", `argument ${p.pin} of ${fi.name} has no default`, a);
         return;
       }
+      // `[]` for an array input: the pin stays unwired, which Blueprint reads as an empty array (LineTraceSingle's ActorsToIgnore)
+      if (ts.isArrayLiteralExpression(stripParens(a)) && (stripParens(a) as ts.ArrayLiteralExpression).elements.length === 0 && p.type.startsWith("array:")) return;
       args.push({ pin: p.pin, value: p.type === "unsupported:delegate" ? this.delegateArg(a) : this.expr(a, p.type) });
     });
 

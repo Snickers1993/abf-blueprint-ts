@@ -27,6 +27,12 @@ export declare class Box {
    * @bpOut OverlappingActors array:object:/Script/FakeEngine.Actor
    */
   GetOverlappingActors(ClassFilter: TSubclassOf<Actor> | (abstract new (...a: never[]) => Actor) | null): Actor[];
+  /**
+   * @bpPath /Script/FakeOverlap.Box:Trace
+   * @bpParam Ignore array:object:/Script/FakeEngine.Actor
+   * @bpOut ReturnValue bool
+   */
+  Trace(Ignore: (Actor | null)[]): boolean;
 }
 `;
 
@@ -39,6 +45,9 @@ export class BP_Overlap extends Actor {
   Count: int = 0;
   private Anyone(box: Box): boolean {
     return box.GetOverlappingActors(Actor).length > 0;
+  }
+  private Empty(box: Box): boolean {
+    return box.Trace([]);
   }
   private Store(box: Box): void {
     const all = box.GetOverlappingActors(null);
@@ -80,4 +89,13 @@ test("a call whose only output is an out parameter is a value read from that pin
     assert.ok(fromOut.length > 0, `${id}: OverlappingActors is wired`);
     assert.ok(!wires.some(([a]) => a === `${call.id}.ReturnValue`), `${id}: no ReturnValue pin is read`);
   }
+});
+
+test("[] for an array input leaves the pin unwired (an empty array)", () => {
+  const ir = irOf();
+  const u = ir.assets.find((a) => a.path.endsWith("BP_Overlap"))!.units.find((x) => x.id === "function:Empty")!;
+  const call = u.nodes.find((n) => (n.t3d.props ?? []).some((p) => p.includes('MemberName="Trace"')))!;
+  assert.ok(call);
+  assert.ok(!(u.wires as Array<[string, string]>).some(([, b]) => b === `${call.id}.Ignore`));
+  assert.equal(call.pinDefaults?.Ignore, undefined);
 });
