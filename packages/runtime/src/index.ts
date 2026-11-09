@@ -100,6 +100,12 @@ export declare function spawnActor<T>(cls: abstract new (...a: never[]) => T, op
  * `asset(SoundBase, "/Game/Audio/S_Beep")`. Only as an argument of a call: it becomes that pin's default object, so the
  * asset cooks with the Blueprint and needs no load node. The path is a string literal; `@mod/` means the mod being built.
  */
+/**
+ * The world subsystem of class `cls` (Blueprint "Get <Subsystem>", K2Node_GetSubsystem): `getWorldSubsystem(WorldFlagSubsystem)`.
+ * A pure node with no exec pins; call the subsystem's own functions on the result (`sub.HasWorldFlag(...)`). The class must be a
+ * native WorldSubsystem (a `/Script/...` class with stubs).
+ */
+export declare function getWorldSubsystem<T>(cls: abstract new (...a: never[]) => T): T;
 export declare function asset<T>(cls: abstract new (...a: never[]) => T, path: string): T;
 /**
  * Binds `target`'s function or event `fn` to `source`'s event dispatcher (Bind Event to <Dispatcher>): Add Delegate plus

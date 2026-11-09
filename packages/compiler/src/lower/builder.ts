@@ -74,8 +74,22 @@ const LITERAL_STRUCT_ORDER: Readonly<Record<string, readonly string[]>> = {
   "/Script/CoreUObject.Vector2D": ["X", "Y"],
   "/Script/CoreUObject.Rotator": ["Pitch", "Yaw", "Roll"],
 };
+/**
+ * A game row handle (a native struct of a game module, not Engine or CoreUObject, whose name ends in RowHandle, e.g. a world-flag
+ * row handle). The game's are not BlueprintType, so a Make Struct node on one is refused; a literal `{ RowName: "Row" }` fed straight
+ * into a pin is the pin's own default `(RowName="Row")`, exactly what picking the row in the pin's dropdown writes.
+ */
+const ROW_HANDLE_RE = /^\/Script\/(?!Engine\.|CoreUObject\.)[A-Za-z0-9_]+\.[A-Za-z0-9_]*RowHandle$/;
 export function structLiteralText(e: HirExpr): string | undefined {
   if (e.k !== "makeStruct") return undefined;
+  if (ROW_HANDLE_RE.test(e.struct)) {
+    const f = e.fields.length === 1 ? e.fields[0]! : undefined;
+    if (!f || f.name !== "RowName") return undefined;
+    const v = f.value;
+    const text = v.k === "nameLit" ? v.text : v.k === "lit" && typeof v.value === "string" ? v.value : undefined;
+    // the pin default is written verbatim inside DefaultValue="...", so the struct text's own quotes are escaped (as the editor exports it)
+    return text === undefined ? undefined : escapeT3dString(`(RowName="${text}")`);
+  }
   const order = LITERAL_STRUCT_ORDER[e.struct];
   if (!order) return undefined;
   const vals: Record<string, number> = {};
@@ -90,6 +104,8 @@ const CMP_NAMES = { "<": "Less", "<=": "LessEqual", ">": "Greater", ">=": "Great
 const K2_EVENT = "/Script/BlueprintGraph.K2Node_Event";
 const K2_CREATE_WIDGET = "/Script/UMGEditor.K2Node_CreateWidget";
 const K2_SPAWN_ACTOR = "/Script/BlueprintGraph.K2Node_SpawnActorFromClass";
+/** Get <Subsystem> (pure); its class is the CustomClass property, its output pin ReturnValue (verified on a hand-made WorldFlagSubsystem node). */
+const K2_GET_SUBSYSTEM = "/Script/BlueprintGraph.K2Node_GetSubsystem";
 /** Engine function libraries of native Map and Set operations (pin names verified against exports of the Mod Editor). */
 const MAP_LIBRARY = "/Script/Engine.BlueprintMapLibrary";
 const SET_LIBRARY = "/Script/Engine.BlueprintSetLibrary";
@@ -503,6 +519,10 @@ export class UnitBuilder {
         this.settle(id, defaults);
         return { pin: `${id}.${P.returnValue}`, nulls: owner?.nulls ?? [] };
       }
+      case "subsystem": {
+        const id = this.emit("subsys", K2_GET_SUBSYSTEM, [`CustomClass="${pinObjectText("class", e.cls, this.classMeta)}"`], undefined, e.span);
+        return { pin: `${id}.${P.returnValue}`, nulls: [] };
+      }
       case "spawn": {
         const owner = e.owner ? this.optOperand(e.owner) : undefined;
         const where = e.transform ? this.operand(e.transform) : undefined;
@@ -601,6 +621,12 @@ export class UnitBuilder {
         const nulls: Exit[] = [];
         const ops = e.fields.map((a) => ({ a, o: this.operand(a.value, a.value.type === "void" || a.value.type === "null" ? undefined : a.value.type) }));
         for (const x of ops) nulls.push(...x.o.nulls);
+        if (ROW_HANDLE_RE.test(e.struct)) {
+          return this.unsupported(
+            `a ${shortName(e.struct)} built from values (it is not a BlueprintType, so it has no Make node); pass { RowName: "Row" } with a literal straight to the pin, or convert a name with the game's Conv_NameTo... function`,
+            e.span,
+          );
+        }
         const native = NATIVE_MAKE[e.struct];
         if (native) {
           // core math structs are not BlueprintType: the editor refuses a Make Struct node on them, so use their native make
@@ -815,6 +841,14 @@ export class UnitBuilder {
           const lit = formatLiteral(init.value, init.type);
           this.locals.set(s.local, lit === undefined ? {} : { lit });
           return;
+        }
+        // a row-handle literal has no node at all (see ROW_HANDLE_RE): the const is its pin default text wherever it is used
+        if (init.k === "makeStruct" && ROW_HANDLE_RE.test(init.struct)) {
+          const lit = structLiteralText(init);
+          if (lit !== undefined) {
+            this.locals.set(s.local, { lit });
+            return;
+          }
         }
         const v = this.value(init);
         // a pure node is evaluated again at every consumer: a value that reads state (an own variable, an array length, a member
