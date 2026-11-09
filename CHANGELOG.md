@@ -48,7 +48,7 @@ abfc uses semantic versioning for its command-line surface: the commands, their 
 
 ### Fixed
 
-- Reading a variable or component that a parent class declares (`this.IsDepleted` in a child of a game Blueprint) names that class as the get's MemberParent; the self-context get had no pins in bp_apply's scratch Blueprint, so the apply failed with "no pin 'IsDepleted'".
+- Reading a variable or component that a parent class declares (`this.IsDepleted` in a child of a game Blueprint) names that class as the get's MemberParent, with a Self node as its Target; the self-context get had no pins in bp_apply's scratch Blueprint, so the apply failed with "no pin 'IsDepleted'".
 
 
 - Engine types used only through other types (designer widgets, return values) were left as placeholders without members. `abfc generate` and the start of `abfc build`, `test` and `publish` now generate the placeholder classes and structs the source uses, record them in `auto.added`, and no `stubs.scriptClasses` entry is needed; the editor offers the quick fix "Generate stubs for ..." on TS2339 and TS2551 for a placeholder receiver.

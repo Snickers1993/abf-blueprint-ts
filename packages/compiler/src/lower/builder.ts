@@ -396,8 +396,10 @@ export class UnitBuilder {
         return this.unsupported("a literal in this position", e.span);
       case "getSelf":
         if (e.owner !== undefined) {
-          // its self pin stays unwired: Target is self
+          // Target = a Self node: Unreal's compile refuses the other-context get with its Target unwired ("invalid target")
           const id = this.emit("get", this.profile.nodeClasses.variableGet, [this.varRef(e.name, e.owner)], { k: "get", name: e.name, class: e.owner }, e.span);
+          const me = this.emit("self", "/Script/BlueprintGraph.K2Node_Self", [], { k: "self" }, e.span);
+          this.link(`${me}.${this.profile.pins.self}`, `${id}.${this.profile.pins.self}`);
           return { pin: `${id}.${e.name}`, nulls: [] };
         }
         return { pin: this.getVar(e.name, e.span), nulls: [] };

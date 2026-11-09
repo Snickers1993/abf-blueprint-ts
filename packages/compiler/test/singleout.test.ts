@@ -129,7 +129,7 @@ export class BP_MyCrate extends BP_FakeCrate_C {
 }
 `;
 
-test("a variable a parent class declares is read with its class as MemberParent; an own one stays self-context", () => {
+test("a variable a parent class declares is read with its class as MemberParent and a Self node as Target; an own one stays self-context", () => {
   const dir = mkdtempSync(join(here, "single-"));
   try {
     cpSync(phase2Dir, dir, { recursive: true });
@@ -146,7 +146,9 @@ test("a variable a parent class declares is read with its class as MemberParent;
     const gets = u.nodes.filter((n) => n.sem?.k === "get");
     const dep = gets.find((n) => n.sem?.k === "get" && n.sem.name === "IsDepleted")!;
     assert.deepEqual(dep.sem, { k: "get", name: "IsDepleted", class: "/Game/Fake/BP_FakeCrate.BP_FakeCrate_C" });
-    assert.ok(!(u.wires as Array<[string, string]>).some(([, b]) => b === `${dep.id}.self`), "Target stays self");
+    const me = u.nodes.find((n) => n.sem?.k === "self")!;
+    assert.ok(me, "a Self node");
+    assert.ok((u.wires as Array<[string, string]>).some(([a, b]) => a === `${me.id}.self` && b === `${dep.id}.self`), "Target = Self");
     const hits = gets.find((n) => n.sem?.k === "get" && n.sem.name === "Hits")!;
     assert.deepEqual(hits.sem, { k: "get", name: "Hits" });
   } finally {
