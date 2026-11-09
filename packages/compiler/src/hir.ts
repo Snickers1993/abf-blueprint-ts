@@ -142,6 +142,8 @@ export type HirExpr = (
   | { k: "enumLit"; text: string; enumPath: string }
   | { k: "nameLit"; text: string }
   | { k: "createWidget"; cls: string; owner: HirExpr }
+  /** `getWorldSubsystem(Class)`: a pure Get Subsystem node of the native world subsystem `cls`. */
+  | { k: "subsystem"; cls: string }
   /** `transform`: the SpawnTransform (absent: identity). */
   | { k: "spawn"; cls: string; owner?: HirExpr; transform?: HirExpr; collision?: string; scale?: string }
   | { k: "arith"; op: "+" | "-" | "*" | "/"; kind: "int" | "real"; a: HirExpr; b: HirExpr }

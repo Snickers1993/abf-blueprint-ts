@@ -1957,6 +1957,7 @@ class HirBuilder {
       }
       if (rt === "asset") return this.assetExpr(node, sp);
       if (rt === "createWidget") return this.createWidgetExpr(node, sp);
+      if (rt === "getWorldSubsystem") return this.subsystemExpr(node, sp);
       if (rt === "spawnActor") return this.spawnExpr(node, sp);
       if (callee.text === "eval") return f.fail("ABFC2020", "eval is not supported", node);
       return f.fail("ABFC2099", `call of "${callee.text}" is not supported`, node);
@@ -2105,6 +2106,17 @@ class HirBuilder {
       args.push({ pin: p.pin, value: this.expr(a, p.type) });
     });
     return { k: "call", owner: this.cls.parent, name, target: null, static: false, pure: false, execOutputs: null, args, outs: [], type: "void", parentCall: true, span: sp };
+  }
+
+  /** `getWorldSubsystem(Class)`: the native world subsystem of that class (a pure Get Subsystem node). */
+  private subsystemExpr(node: ts.CallExpression, sp: Span): HirExpr {
+    const f: DiagSink = this.sink;
+    if (node.arguments.length !== 1) return f.fail("ABFC2099", "getWorldSubsystem(Class) takes one argument, the subsystem class", node);
+    const ci = this.classArg(node.arguments[0]);
+    if (!ci) return f.fail("ABFC2060", "the subsystem class has no Blueprint metadata (@bpPath)", node.arguments[0] ?? node);
+    if (!ci.path.startsWith("/Script/")) return f.fail("ABFC2099", `getWorldSubsystem takes a native subsystem class (/Script/...), not ${ci.path}`, node.arguments[0]!);
+    this.noteSymbol(ci.sym);
+    return { k: "subsystem", cls: ci.path, type: `object:${ci.path}`, span: sp };
   }
 
   private createWidgetExpr(node: ts.CallExpression, sp: Span): HirExpr {
