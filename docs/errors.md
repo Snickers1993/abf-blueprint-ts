@@ -1395,7 +1395,7 @@ Fix: run `abfc build` again. The pass is repeated.
 
 ## 6xxx tests
 
-Codes 6001 and 6002 are Unreal compile errors reported after a build applied the Blueprints. 6101-6201 come from `abfc test` and from the test gate of `abfc publish`. They exit with 1 when they are errors. Writing tests is covered in [first-mod.md](first-mod.md).
+Codes 6001 and 6002 are Unreal compile errors reported after a build applied the Blueprints; 6003 is an override that the apply turned into a custom event. 6101-6201 come from `abfc test` and from the test gate of `abfc publish`. They exit with 1 when they are errors. Writing tests is covered in [first-mod.md](first-mod.md).
 
 ### ABFC6001
 
@@ -1416,6 +1416,16 @@ Meaning: Unreal reported a compile error that abfc could not map to a TypeScript
 Typical cause: an error in a node abfc does not own, or a message without a node.
 
 Fix: read the message. For a hand-made node, fix it in the Mod Editor. After a failed compile abfc re-syncs the stage from the mod, so the next build applies your units again; `--keep-failed-stage` keeps the failed stage instead.
+
+### ABFC6003
+
+Severity: error · Exit: 1
+
+Meaning: an `@override` did not come out of the apply as an override event. Unreal made it a custom event named like the parent's function (for example `GunStartFiring_1`), which compiles clean but is never called, so the parent's implementation keeps running. The build fails and the stage is re-synced, so the stray event is never published.
+
+Typical cause: the event is declared in a Blueprint class (a game weapon's `GunStartFiring`), not in native code, and the backend built the node's template in its Actor scratch Blueprint, where the event does not exist. Native events (`ReceiveBeginPlay`, `ReceiveTick`) are not affected.
+
+Fix: apply `backend-override-blueprint-events.patch` to abf-mod-editor-mcp (it templates such an event in a scratch child of the class that declares it), restart the backend and build again. Until then, hand-make the override in the Mod Editor and call a custom `@event` from it.
 
 ### ABFC6101
 

@@ -524,6 +524,7 @@ async function buildInner(ctx: CliContext, session: BackendSession, rec: Recorde
   // but takes the IR hash of the applied units and the class defaults hash only after Unreal's compile passed: until then the
   // applied units count as changed, so a failed compile is repeated (and reported) by the next build instead of passing as up to date.
   const finals: Manifest[] = [];
+  const badOverrides: Diagnostic[] = [];
   const stagedUnits: string[] = [];
   const appliedAssets: string[] = [];
   const createdStructs: string[] = [];
@@ -548,6 +549,25 @@ async function buildInner(ctx: CliContext, session: BackendSession, rec: Recorde
     if (outcome.tagWarning) output.diag(outcome.tagWarning);
     for (const d of outcome.defaultsWarnings) output.diag(d);
     const nodes = parseExport(outcome.finalText ?? (await readAsset(ctx, backend, a.asset)).text).nodes;
+    // An @override must come out as an override event. An event Unreal could not resolve while the backend templated it (a backend
+    // without the Blueprint-class override fix templates against an Actor scratch) is turned into a custom event named like the
+    // parent's function (GunStartFiring_1): it compiles clean but is never called, so the parent's code keeps running.
+    for (const p of a.units) {
+      if (p.unit.kind !== "override") continue;
+      const entry = p.unit.nodes.find((n) => n.sem?.k === "override");
+      const real = entry === undefined ? undefined : outcome.nodeIds[nodeKey(p.unit, entry.id)];
+      const node = real === undefined ? undefined : nodes.get(t3dNodeKey(p.unit.graph, real));
+      if (node === undefined || node.head.includes("bOverrideFunction=True")) continue;
+      const custom = node.head.map((h) => /^CustomFunctionName="([^"]+)"/.exec(h)?.[1]).find((x) => x !== undefined);
+      badOverrides.push({
+        severity: "error",
+        code: "ABFC6003",
+        asset: a.asset,
+        span: p.unit.origin,
+        message: `@override ${p.unit.name} did not become an override event in ${a.asset.slice(a.asset.lastIndexOf("/") + 1)}${custom !== undefined ? `: Unreal made it the custom event ${custom}` : ""}, so the parent's ${p.unit.name} would still run and this code never would.`,
+        fix: "apply backend-override-blueprint-events.patch to abf-mod-editor-mcp (an event declared in a Blueprint class, such as a game weapon's GunStartFiring, needs it) and build again; until then call a custom @event from a hand-made override.",
+      });
+    }
 
     const old = manifests.get(a.asset) ?? null;
     // Units that left the TS are gone from the stage now (or were never there): drop them from the manifest. This is not held back
@@ -695,7 +715,9 @@ async function buildInner(ctx: CliContext, session: BackendSession, rec: Recorde
           },
         )
       : ({ clean: true, messages: [] } as unknown as CompileReport);
-  const compileOk = compileClean(report);
+  for (const d of badOverrides) output.diag(d);
+  // A lost override fails the build like a compile error: the stage is re-synced so the stray custom event is not published.
+  const compileOk = compileClean(report) && badOverrides.length === 0;
   rec.record("build.compile", since(tCompile), compileOk);
   if (!compileOk) {
     for (const asset of appliedAssets) {

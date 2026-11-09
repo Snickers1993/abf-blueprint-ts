@@ -117,6 +117,11 @@ export interface RecordedCall {
 export interface FakeBackendOptions {
   /** The backend lists `backend_info` in the shape of the wildcard-pins branch (default false: an older backend without it). */
   backendInfo?: boolean;
+  /**
+   * Like a backend without backend-override-blueprint-events.patch: an `override` of an event declared in a Blueprint class (not
+   * /Script/) comes out as a custom event named `<function>_1`, as Unreal turns an event the Actor template scratch cannot resolve.
+   */
+  overrideAsCustomEvent?: boolean;
   /** The initial asset holds a hand-made `UpdateTarget` event (default true). */
   handMadeEvent?: boolean;
   /** `staging_sync` with discardChanges (a resync) fails; the first sync of a missing stage still works (default false). */
@@ -1133,6 +1138,8 @@ export class FakeBackend implements Backend {
       head.push(`FunctionReference=(${s.class ? `MemberParent="${s.class}",` : ""}MemberName="${s.function ?? ""}")`);
     } else if (s.k === "get" || s.k === "set") {
       head.push(`VariableReference=(${s.class ? `MemberParent="${s.class}",` : ""}MemberName="${s.name ?? ""}")`);
+    } else if (s.k === "override" && this.options.overrideAsCustomEvent === true && !(s.class ?? "").startsWith("/Script/")) {
+      head.push(`CustomFunctionName="${s.function ?? ""}_1"`);
     } else if (s.k === "override") {
       head.push(`EventReference=(MemberParent="/Script/CoreUObject.Class'${s.class ?? ""}'",MemberName="${s.function ?? ""}")`, "bOverrideFunction=True");
     } else if (s.k === "event") {
