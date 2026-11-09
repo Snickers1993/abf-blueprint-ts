@@ -10,6 +10,8 @@ abfc uses semantic versioning for its command-line surface: the commands, their 
 
 ### Added
 
+- Blueprint interfaces: `@blueprint({ interfaces: [I_Interactable_C] })` makes the class implement them, and `@override InteractWith_A(...)` (no TS `override` keyword: TypeScript does not see the interface as a base) implements an interface event, as an override event node naming the interface. An interface function with outputs becomes a function graph. The interfaces go to bp_apply as `interfaces` (backend feature `interfaces`; without it ABFC2044). A bad option is ABFC2104.
+- `super.X()` of a parent function with outputs returns them (a value for a lone ReturnValue, else a result object: `super.Pick(i).Count`).
 - Field initializers that need the class defaults rather than a pin default: native struct literals (`Home: Vector = { X: 1, Y: 2, Z: 3 }`), arrays of literals or of struct literals (`Spots: Vector[] = [...]`, `Labels: name[] = ["a"]`, `Empty: int[] = []`), `text`, `asset(Class, "path")` for an object field, and a class for a class field (`Pot: TSubclassOf<BP_Pot_C> = BP_Pot_C`; `TSubclassOf<T>` now also accepts the class itself). They are written onto the class default object by the class-defaults pass (keys `field:<Name>`). A mod struct or a value that is not a literal is still ABFC2047.
 - `@blueprint({ tickEnabled: false })` sets Start with Tick Enabled on the class defaults (was ABFC2063, now retired).
 - `spawnActor(Class, { instigator })` feeds the Instigator pin.

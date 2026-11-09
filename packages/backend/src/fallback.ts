@@ -92,6 +92,7 @@ export async function applyTwoPhase(
     }
     const spec: BpApplyAssetSpec = { asset: x.spec.asset, raw };
     if (x.spec.create) spec.create = x.spec.create;
+    if (x.spec.interfaces) spec.interfaces = x.spec.interfaces;
     if (x.spec.variables) spec.variables = x.spec.variables;
     if (x.spec.remove_functions) spec.remove_functions = x.spec.remove_functions;
     if (x.spec.functions) spec.functions = x.spec.functions;

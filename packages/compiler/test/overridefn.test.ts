@@ -173,3 +173,17 @@ export class BP_Gun extends BP_FakeGun_C {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("super.X() of a parent function with outputs gives its outputs (a value, or a result object read by name)", () => {
+  const src = SOURCE.replace("return this.Armed;\n  }", "return super.CanFire();\n  }")
+    .replace("return { Count: Index, Ok: this.Armed };", "return { Count: super.Pick(Index).Count, Ok: this.Armed };");
+  const { ir, diagnostics } = build(src);
+  assert.deepEqual(diagnostics, []);
+  const units = ir!.assets[0]!.units;
+  for (const [unit, pin] of [["CanFire", "ReturnValue"], ["Pick", "Count"]] as const) {
+    const u = units.find((x) => x.name === unit)!;
+    const parent = u.nodes.find((n) => n.t3d.class === "/Script/BlueprintGraph.K2Node_CallParentFunction");
+    assert.ok(parent, unit);
+    assert.ok(u.wires.some(([from]) => from === `${parent!.id}.${pin}`), JSON.stringify(u.wires));
+  }
+});

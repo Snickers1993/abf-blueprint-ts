@@ -267,6 +267,8 @@ class HirBuilder {
   private unitPinOfTs: Map<string, string> | undefined;
   /** The unit implements a parent's event or function (`@override`), as an event or a function graph. */
   private unitOverride = false;
+  /** Interfaces of the class being built (`@blueprint({ interfaces })`): where an `@override` not found on the parent is looked up. */
+  private ifaceTypes: Array<{ path: string; type: ts.Type }> = [];
   /** Calls between the owned units of the class being built: caller -> callees (for the recursion check). */
   private ownCalls = new Map<string, Set<string>>();
   /** Name node of every owned function of the class being built. */
@@ -306,6 +308,7 @@ class HirBuilder {
     let classManagerRow: string | undefined;
     let classManagerRowNode: ts.Node | undefined;
     let widget = false;
+    const ifaces: Array<{ path: string; type: ts.Type }> = [];
     const defaultOpts: Array<{ key: string; prop: string; value: string; node: ts.Node }> = [];
     const opts = ts.isCallExpression(bp.expression) ? bp.expression.arguments[0] : undefined;
     if (opts && ts.isObjectLiteralExpression(opts)) {
@@ -315,6 +318,26 @@ class HirBuilder {
         if (key === "path") {
           // the asset path is resolved by assetPathOf below
         } else if (key === "parent") parentOption = lit;
+        else if (key === "interfaces") {
+          const init = (p as ts.PropertyAssignment).initializer;
+          if (!ts.isArrayLiteralExpression(init)) {
+            this.sink.error("ABFC2104", "@blueprint option interfaces must be an array literal of interface classes ([I_Interactable_C])", init);
+            continue;
+          }
+          for (const el of init.elements) {
+            const ci = this.classArg(el);
+            if (!ci || ci.kind !== "class") {
+              this.sink.error("ABFC2104", "an entry of interfaces must be a Blueprint interface class from the stubs (I_Interactable_C)", el);
+              continue;
+            }
+            if (ifaces.some((x) => x.path === ci.path)) {
+              this.sink.error("ABFC2104", `interface ${ci.path} is listed twice`, el);
+              continue;
+            }
+            this.classMeta[ci.path] = ci.meta;
+            ifaces.push({ path: ci.path, type: this.checker.getDeclaredTypeOfSymbol(ci.sym) });
+          }
+        }
         else if (key === "classManagerRow") {
           classManagerRow = lit;
           classManagerRowNode = p;
@@ -410,7 +433,9 @@ class HirBuilder {
       ...(classManagerRow !== undefined ? { classManagerRow } : {}),
       ...(director !== undefined ? { director } : {}),
       ...(widget ? { kind: "widget" as const } : {}),
+      ...(ifaces.length > 0 ? { interfaces: ifaces.map((x) => x.path) } : {}),
     };
+    this.ifaceTypes = ifaces;
     this.classMeta[cls.classPath] = widget ? WIDGET_META : BLUEPRINT_META;
 
     // Signatures first: a call or delegate reference may point to an event declared further down.
@@ -1064,9 +1089,23 @@ class HirBuilder {
     }
 
     const prop = this.checker.getPropertyOfType(parentType, name);
-    const fi = prop ? functionInfo(prop) : undefined;
+    let fi = prop ? functionInfo(prop) : undefined;
+    // not on the parent: an event or function of one of the class's interfaces (`@blueprint({ interfaces })`)
+    let viaInterface = false;
     if (!fi) {
-      this.sink.error("ABFC2060", `@override ${name}: the parent class has no event or function ${name} with Blueprint metadata (@bpPath)`, m.name);
+      for (const it of this.ifaceTypes) {
+        const ip = this.checker.getPropertyOfType(it.type, name);
+        const ifi = ip ? functionInfo(ip) : undefined;
+        if (ifi) {
+          fi = { ...ifi, owner: it.path };
+          viaInterface = true;
+          break;
+        }
+      }
+    }
+    if (!fi) {
+      const hint = this.ifaceTypes.length > 0 ? " or its interfaces" : " (an interface event needs the interface in @blueprint({ interfaces: [...] }))";
+      this.sink.error("ABFC2060", `@override ${name}: the parent class${hint} has no event or function ${name} with Blueprint metadata (@bpPath)`, m.name);
       return undefined;
     }
     if (fi.params.length !== params.length) {
@@ -1077,7 +1116,8 @@ class HirBuilder {
     // A parent function with outputs is overridden by a function graph (its entry and result nodes name the parent), not by an
     // event. So is every member a Blueprint class declares: what a child can override there is a function graph (a weapon's
     // GunStartFiring), and an event node for it comes out of the apply as a custom event GunStartFiring_1 (ABFC6003, 9 Nov PC run).
-    if (fi.outs.length > 0 || !fi.owner.startsWith("/Script/")) {
+    // An interface event without outputs is an event node naming the interface (as the editor's "Implement event" makes it).
+    if (fi.outs.length > 0 || (!viaInterface && !fi.owner.startsWith("/Script/"))) {
       if (fi.execOutputs !== null) {
         this.sink.error("ABFC2099", `@override ${name}: overriding a parent function with exec outputs is not supported`, m.name);
         return undefined;
@@ -2208,14 +2248,19 @@ class HirBuilder {
     const sym = this.checker.getSymbolAtLocation(callee.name);
     const fi = sym ? functionInfo(sym) : undefined;
     if (!fi) return f.fail("ABFC2060", `function ${name} has no Blueprint metadata (@bpPath)`, callee.name);
-    if (fi.outs.length > 0 || fi.execOutputs !== null) return f.fail("ABFC2099", `super.${name}() is supported only for parent events without outputs`, node);
+    if (fi.execOutputs !== null) return f.fail("ABFC2099", `super.${name}() is not supported for a parent function with exec outputs`, node);
     const args: Array<{ pin: string; value: HirExpr }> = [];
     node.arguments.forEach((a, i) => {
       const p = fi.params[i];
       if (!p) f.fail("ABFC2099", `too many arguments for ${name}`, a);
       args.push({ pin: p.pin, value: this.expr(a, p.type) });
     });
-    return { k: "call", owner: this.cls.parent, name, target: null, static: false, pure: false, execOutputs: null, args, outs: [], type: "void", parentCall: true, span: sp };
+    // outputs as a normal call types them: one ReturnValue is the value, anything else a result object (`super.Pick(i).Ok`)
+    const multi = fi.outs.length > 1 || (fi.outs.length === 1 && fi.outs[0]?.pin !== "ReturnValue");
+    const type = multi ? "result" : (fi.outs[0]?.type ?? "void");
+    const out: HirExpr = { k: "call", owner: this.cls.parent, name, target: null, static: false, pure: false, execOutputs: null, args, outs: fi.outs, type, parentCall: true, span: sp };
+    this.callInfo.set(out, fi);
+    return out;
   }
 
   /** `getWorldSubsystem(Class)`: the native world subsystem of that class (a pure Get Subsystem node). */

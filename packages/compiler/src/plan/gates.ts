@@ -9,6 +9,8 @@ export interface GateCapabilities {
   eventMeta?: boolean;
   /** bp_apply feature `function_graphs`; absent counts as false. */
   functionGraphs?: boolean;
+  /** bp_apply feature `interfaces`; absent counts as false. */
+  interfaces?: boolean;
 }
 
 /**
@@ -86,6 +88,17 @@ export function featureGates(ir: IrModule, caps: GateCapabilities): Diagnostic[]
         if (origin) check(p.type, a.path, origin);
       }
       for (const n of u.nodes) for (const t of Object.values(n.pinTypes ?? {})) check(t, a.path, n.origin);
+    }
+    if ((a.interfaces?.length ?? 0) > 0 && caps.interfaces !== true) {
+      const span = a.units[0]?.origin ?? a.variables[0]?.origin;
+      out.push({
+        severity: "error",
+        code: "ABFC2044",
+        asset: a.path,
+        ...(span ? { span } : {}),
+        message: `${a.path} implements ${a.interfaces!.join(", ")}: that needs a backend with bp_apply feature interfaces; update abf-mod-editor-mcp`,
+        fix: "update abf-mod-editor-mcp (see docs/backend.md)",
+      });
     }
     if (a.create !== undefined && !caps.createKinds.includes(a.create.kind)) {
       const span = a.variables[0]?.origin ?? a.units[0]?.nodes[0]?.origin ?? a.structFields?.[0]?.origin;

@@ -42,6 +42,8 @@ export interface HirClass {
   director?: { row: string; asset: string; /** The gameplay tag the row holds (`@director("Row", tag)`). */ tag?: string };
   /** `widget`: the asset is a Widget Blueprint (`@blueprint({ kind: "widget" })`). */
   kind?: "widget";
+  /** `@blueprint({ interfaces: [...] })`: class paths of the Blueprint interfaces the asset implements. */
+  interfaces?: string[];
 }
 
 export interface HirEvent {

@@ -877,6 +877,16 @@ Typical cause: a log line, a counter or a fallback inside `if (!isValid(x)) { ..
 
 Fix: write `if (!x) { ... }`, which runs the branch when the cast fails. `if (isValid(x)) { ... } else { ... }` runs the else side for a failed cast too.
 
+### ABFC2104
+
+Severity: error · Exit: 1
+
+Meaning: the `interfaces` option of `@blueprint` is not an array literal of interface classes from the stubs, or lists one twice.
+
+Typical cause: `interfaces: I_Interactable_C` without the brackets, a string path, or a class that has no stub.
+
+Fix: write `@blueprint({ interfaces: [I_Interactable_C] })` with the class imported from its stub (run `abfc generate --add <class path>` if there is none).
+
 ### ABFC3001
 
 Severity: error in `abfc build` and `abfc publish`, warning in `abfc check` · Exit: 2 (error), - (warning). The generator-version variant is always a warning.

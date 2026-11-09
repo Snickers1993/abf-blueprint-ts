@@ -21,6 +21,8 @@ export interface IrAsset {
   classManagerRow?: string;
   /** `@director("Row")`: the class-manager row asset (`/<mod>/<table>/<Row>`) that should reference this class. */
   director?: { row: string; asset: string; /** The gameplay tag the row holds (`@director("Row", tag)`). */ tag?: string };
+  /** Class paths of the Blueprint interfaces the asset implements (`@blueprint({ interfaces })`); added before the graphs are applied. */
+  interfaces?: string[];
   variables: IrVariable[];
   units: IrUnit[]; // owned functions/events/overrides
   structFields?: IrVariable[]; // only for UserDefinedStruct
@@ -128,6 +130,8 @@ export interface BackendCapabilities {
   variableDefaults: boolean;
   /** bp_apply feature `function_graphs`: own functions with access flags and same-name replace. */
   functionGraphs: boolean;
+  /** bp_apply feature `interfaces`: an asset spec may list Blueprint interfaces to implement. */
+  interfaces: boolean;
   bpApplyFeatures: string[];
   nodeKinds: string[];
   /** `mod_audit` can audit the stage (false in Phase 1: it audits the real mod). */
@@ -199,6 +203,8 @@ export interface AssetPlan {
   variables: IrVariable[];
   units: Array<{ unit: IrUnit; removeNodes: string[]; origin: [number, number] }>;
   classMeta: Record<string, string>;
+  /** Blueprint interfaces the asset implements (bp_apply feature `interfaces`): the backend adds the missing ones before the graphs. */
+  interfaces?: string[];
   /** Real entry node name of units that are not in this plan but are the target of a cross wire of a planned unit (from the manifest). */
   entryNames?: Record<string, string>;
   /** Manifest units no longer in the TS whose stage nodes are removed (nodes include the tag comment). */

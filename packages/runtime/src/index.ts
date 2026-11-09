@@ -60,6 +60,12 @@ export interface BlueprintOptions {
   tickInterval?: number;
   /** Start with tick enabled (PrimaryActorTick.bStartWithTickEnabled); an Actor only. Written by the class-defaults pass. */
   tickEnabled?: boolean;
+  /**
+   * Blueprint interfaces the class implements (`interfaces: [I_Interactable_C]`), added to the asset by the backend. Their events are
+   * implemented with `@override` like a parent's (`@override InteractWith_A(...)`, no TS `override` keyword since TypeScript does not
+   * see the interface as a base class); an interface function with outputs becomes a function graph.
+   */
+  interfaces?: ReadonlyArray<abstract new (...a: never[]) => unknown>;
   /** row asset path, verified (Phase 2) @deprecated Use `@director("RowName")`. */
   classManagerRow?: string;
   /** The asset is a Widget Blueprint; the class must extend a UserWidget. The designer layout (WidgetTree) stays hand-made; designer widgets are read-only members of the `_Manual` stub. */

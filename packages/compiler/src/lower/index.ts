@@ -37,6 +37,7 @@ export function lower(h: HirProgram, profile: Profile, opts: LowerOptions = {}):
       ...(Object.keys(cls.defaults).length > 0 ? { classDefaults: { ...cls.defaults } } : {}),
       ...(cls.classManagerRow !== undefined ? { classManagerRow: cls.classManagerRow } : {}),
       ...(cls.director !== undefined ? { director: cls.director } : {}),
+      ...(cls.interfaces !== undefined && cls.interfaces.length > 0 ? { interfaces: [...cls.interfaces] } : {}),
     };
   });
   return { irVersion: 1, profile: profile.id, mod: h.mod, assets: [...structs, ...classes], classMeta: h.classMeta };
