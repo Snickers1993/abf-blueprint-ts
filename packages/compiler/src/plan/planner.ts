@@ -469,7 +469,7 @@ export function planBuild(ir: IrModule, input: PlanInput): PlanResult {
     const functions: NonNullable<AssetPlan["functions"]> = [];
     for (const p of picked) {
       if (p.unit.kind !== "function") continue;
-      functions.push({ name: p.unit.name, inputs: p.unit.signature.inputs, outputs: p.unit.signature.outputs, access: p.unit.signature.access ?? "public" });
+      functions.push({ name: p.unit.name, inputs: p.unit.signature.inputs, outputs: p.unit.signature.outputs, access: p.unit.signature.access ?? "public", ...(p.unit.signature.override !== undefined ? { override: p.unit.signature.override } : {}) });
       if (hasFunctionGraph(snapshot, p.unit.graph)) removeFunctionSet.add(p.unit.graph);
     }
 

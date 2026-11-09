@@ -45,7 +45,7 @@ export interface BpApplyAssetSpec {
   /** Function graphs to delete (TS wins: hand-made functions of a non-hybrid class). */
   remove_functions?: string[];
   /** Backend bp_apply feature `function_graphs`: own function graphs to create (signature only; the body comes in `graphs`). A name also in `remove_functions` is replaced. */
-  functions?: Array<{ name: string; inputs: IrParam[]; outputs: IrParam[]; access?: "public" | "protected" | "private" }>;
+  functions?: Array<{ name: string; inputs: IrParam[]; outputs: IrParam[]; access?: "public" | "protected" | "private"; /** Overrides the parent function of this name: the generated class path of the class that declares it (backend feature `override_functions`). */ override?: string }>;
   graphs?: BpGraphSpec[];
   raw?: Array<{ kind: "graph"; graph: string; text: string } | { kind: "python"; code: string }>;
   /** Backend 2.5.0 (bp_apply feature `class_manager_row`): write the class-manager row of a `@director` class after the Blueprints are saved. */
@@ -223,7 +223,7 @@ export function renderMainSpec(a: AssetPlan, caps: BackendCapabilities, profile:
   }
   if ((a.removeVariables?.length ?? 0) > 0) spec.remove_variables = [...a.removeVariables!];
   if ((a.removeFunctions?.length ?? 0) > 0) spec.remove_functions = [...a.removeFunctions!];
-  if ((a.functions?.length ?? 0) > 0) spec.functions = a.functions!.map((f) => ({ name: f.name, inputs: f.inputs, outputs: f.outputs, access: f.access }));
+  if ((a.functions?.length ?? 0) > 0) spec.functions = a.functions!.map((f) => ({ name: f.name, inputs: f.inputs, outputs: f.outputs, access: f.access, ...(f.override !== undefined ? { override: f.override } : {}) }));
   // A removed function graph is gone before the graphs are edited (nothing to edit); a replaced one is created fresh (nothing to remove).
   // A function graph without any node or wire to add needs no edit at all.
   for (const graph of a.removeFunctions ?? []) {

@@ -32,7 +32,7 @@ export interface IrUnit {
   kind: "function" | "event" | "override";
   name: string;
   graph: string; // "EventGraph" for events, the function name for functions
-  signature: { inputs: IrParam[]; outputs: IrParam[]; net?: "server" | "client" | "multicast"; reliable?: boolean; /** Functions only: the Blueprint access specifier. */ access?: "public" | "protected" | "private" };
+  signature: { inputs: IrParam[]; outputs: IrParam[]; net?: "server" | "client" | "multicast"; reliable?: boolean; /** Functions only: the Blueprint access specifier. */ access?: "public" | "protected" | "private"; /** Functions only: the class path of the parent that declares the function this graph overrides. */ override?: string };
   locals: IrVariable[]; // honored when the backend has functionLocals; else hoisted by the lowering
   nodes: IrNode[];
   wires: IrWire[];
@@ -214,7 +214,7 @@ export interface AssetPlan {
   /** Own fields declared in the asset whose TS default differs from the manifest: the new text, or null to drop the default. */
   variableDefaults?: Record<string, string | null>;
   /** Function graphs to create (signature only; the body comes in graphs). A name also in removeFunctions is replaced. */
-  functions?: Array<{ name: string; inputs: IrParam[]; outputs: IrParam[]; access: "public" | "protected" | "private" }>;
+  functions?: Array<{ name: string; inputs: IrParam[]; outputs: IrParam[]; access: "public" | "protected" | "private"; /** Overrides the parent function of this name (class path of its declaring class). */ override?: string }>;
   /** TS wins: hand-made function graphs removed from a non-hybrid class. */
   removeFunctions?: string[];
   /** Own fields gone from the TS that were not in the asset any more: only the manifest record is dropped. */

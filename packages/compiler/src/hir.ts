@@ -57,6 +57,8 @@ export interface HirEvent {
   returnType?: BpType;
   /** Functions: the access specifier. */
   access?: "public" | "protected" | "private";
+  /** A function that overrides a parent function with named outputs (`overrideOf` set): its out pins, in the parent's order. */
+  outputs?: Array<{ name: string; type: BpType }>;
   body: HirStmt[];
   span: Span;
 }
@@ -77,7 +79,8 @@ export type HirStmt =
   /** `nextOnly`: every use is inside the very next statement (an expression, const or return statement, or the condition of an if), read once right away. */
   | { k: "const"; local: LocalId; name: string; init: HirExpr; uses: number; nextOnly?: boolean; span: Span }
   | { k: "if"; cond: HirExpr; then: HirStmt[]; else: HirStmt[]; span: Span }
-  | { k: "return"; value?: HirExpr; span: Span }
+  /** `outs`: the values of named out pins (`return { Out: v }` in an override of a parent function with outputs). */
+  | { k: "return"; value?: HirExpr; outs?: Array<{ pin: string; value: HirExpr }>; span: Span }
   /** `index`: `arr.forEach((x, i) => ...)`: local of the index parameter (the loop index, int). */
   | { k: "forOf"; local: LocalId; name: string; array: HirExpr; elem: BpType; index?: LocalId; body: HirStmt[]; span: Span }
   /** `this.X = c ? a : b`: Branch plus one set per side. */

@@ -3,6 +3,7 @@ import ts from "typescript";
 import { BpTypeError, DEFAULT_CLASS_MANAGER_TABLE, DIRECTOR_TAG_PREFIX, gameplayTagProblem, joinModPath, parseBpType, segmentProblem } from "@abfc/ir";
 import type { Diagnostic, Profile, Span } from "@abfc/ir";
 import type { BpType, HirClass, HirEvent, HirField, HirExpr, HirProgram, HirStmt, HirStruct, LocalId } from "../hir.js";
+import { FUNCTION_RETURN_PIN } from "../hir.js";
 import { assetPathOf, bindPathContext, modImportHints, pathContextOf } from "./assetpaths.js";
 import type { AssetPathInfo, CompilerProjectConfig } from "./assetpaths.js";
 import { DiagSink, Fail, relFile, spanOf } from "./diag.js";
@@ -167,6 +168,10 @@ interface OwnSig {
   /** The TypeScript parameter symbols, in order (for binding the body). */
   paramSyms: Array<ts.Symbol | undefined>;
   overrideOf?: string;
+  /** An `@override` of a parent function with named outputs (not a lone ReturnValue): its out pins; a return gives them as an object literal. */
+  outs?: Array<{ pin: string; type: BpType }>;
+  /** TS name -> out pin, for `outs`. */
+  pinOfTs?: Map<string, string>;
 }
 
 /** Array methods that change the array; they are statements on an own array variable only. */
@@ -194,7 +199,7 @@ function directExprs(s: HirStmt): HirExpr[] {
     case "setOn": return [s.obj, s.value];
     case "bind": return s.target === null ? [s.source] : [s.source, s.target];
     case "const": return [s.init];
-    case "return": return s.value ? [s.value] : [];
+    case "return": return [...(s.value ? [s.value] : []), ...(s.outs ?? []).map((o) => o.value)];
     case "if": return [s.cond];
     case "forOf": return [s.array];
     case "setSelfCond": return [s.cond, s.a, s.b];
@@ -234,6 +239,11 @@ class HirBuilder {
   private unitKind: HirEvent["kind"] = "event";
   private unitName = "";
   private unitReturn: BpType | undefined;
+  /** The unit overrides a parent function with named outputs: its out pins (see OwnSig.outs). */
+  private unitOuts: Array<{ pin: string; type: BpType }> | undefined;
+  private unitPinOfTs: Map<string, string> | undefined;
+  /** The unit implements a parent's event or function (`@override`), as an event or a function graph. */
+  private unitOverride = false;
   /** Calls between the owned units of the class being built: caller -> callees (for the recursion check). */
   private ownCalls = new Map<string, Set<string>>();
   /** Name node of every owned function of the class being built. */
@@ -957,7 +967,25 @@ class HirBuilder {
       this.sink.error("ABFC2055", `@override ${name} takes ${params.length} parameter(s) but the parent declares ${fi.params.length}`, m.name);
       return undefined;
     }
-    return { node: m, kind, params: fi.params.map((p) => ({ name: p.pin, type: p.type })), paramSyms, overrideOf: fi.owner };
+    const fparams = fi.params.map((p) => ({ name: p.pin, type: p.type }));
+    if (fi.outs.length > 0) {
+      // a parent function with outputs is overridden by a function graph (its entry and result nodes name the parent), not by an event
+      if (fi.execOutputs !== null) {
+        this.sink.error("ABFC2099", `@override ${name}: overriding a parent function with exec outputs is not supported`, m.name);
+        return undefined;
+      }
+      const lone = fi.outs.length === 1 && fi.outs[0]!.pin === FUNCTION_RETURN_PIN;
+      return {
+        node: m,
+        kind: "function",
+        params: fparams,
+        paramSyms,
+        overrideOf: fi.owner,
+        access: "public",
+        ...(lone ? { returnType: fi.outs[0]!.type } : { outs: fi.outs, pinOfTs: fi.pinOfTs }),
+      };
+    }
+    return { node: m, kind, params: fparams, paramSyms, overrideOf: fi.owner };
   }
 
   private isHybrid(node: ts.ClassDeclaration): boolean {
@@ -993,6 +1021,9 @@ class HirBuilder {
     this.unitKind = sig.kind;
     this.unitName = name.text;
     this.unitReturn = sig.returnType;
+    this.unitOuts = sig.outs;
+    this.unitPinOfTs = sig.pinOfTs;
+    this.unitOverride = sig.overrideOf !== undefined;
     const body = this.stmts(m.body!.statements);
     const doc = docOf(m);
     return {
@@ -1002,6 +1033,7 @@ class HirBuilder {
       ...(doc !== undefined ? { doc } : {}),
       params: sig.params,
       ...(sig.kind === "function" ? { ...(sig.returnType !== undefined ? { returnType: sig.returnType } : {}), access: sig.access ?? "public" } : {}),
+      ...(sig.outs !== undefined ? { outputs: sig.outs.map((o) => ({ name: o.pin, type: o.type })) } : {}),
       body,
       span: this.sp(name),
     };
@@ -1061,6 +1093,7 @@ class HirBuilder {
       if (this.unitKind !== "function") {
         f.fail("ABFC2099", "an @event or @override cannot return a value; put the logic in an undecorated method (a Blueprint function) to return one", node);
       }
+      if (this.unitOuts !== undefined) return this.outsReturn(node, node.expression, this.unitOuts);
       if (this.unitReturn === undefined) f.fail("ABFC2099", "a void function cannot return a value", node);
       const value = this.expr(node.expression, this.unitReturn);
       return { k: "return", value, span: this.sp(node) };
@@ -2009,11 +2042,39 @@ class HirBuilder {
     return out;
   }
 
+  /** `return { Out: v, ... }` in an override of a parent function with named outputs: one value per out pin, all of them. */
+  private outsReturn(node: ts.ReturnStatement, e: ts.Expression, outs: Array<{ pin: string; type: BpType }>): HirStmt {
+    const f: DiagSink = this.sink;
+    let x = e;
+    while (ts.isParenthesizedExpression(x)) x = x.expression;
+    if (!ts.isObjectLiteralExpression(x)) return f.fail("ABFC2099", `${this.unitName} returns its outputs as an object literal: return { ${outs.map((o) => `${o.pin}: ...`).join(", ")} }`, e);
+    const fields: Array<{ pin: string; value: HirExpr }> = [];
+    for (const p of x.properties) {
+      let name: string;
+      let init: ts.Expression;
+      if (ts.isPropertyAssignment(p) && (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name))) {
+        name = p.name.text;
+        init = p.initializer;
+      } else if (ts.isShorthandPropertyAssignment(p)) {
+        name = p.name.text;
+        init = p.name;
+      } else return f.fail("ABFC2099", "only `name: value` and shorthand properties are supported in a returned outputs literal", p);
+      const pin = this.unitPinOfTs?.get(name) ?? name;
+      const o = outs.find((y) => y.pin === pin);
+      if (!o) return f.fail("ABFC2099", `${this.unitName} has no output "${name}"`, p);
+      if (fields.some((y) => y.pin === pin)) return f.fail("ABFC2099", `output "${name}" is given twice`, p);
+      fields.push({ pin, value: this.expr(init, o.type) });
+    }
+    const missing = outs.filter((o) => !fields.some((y) => y.pin === o.pin));
+    if (missing.length > 0) return f.fail("ABFC2099", `${this.unitName} must return every output (missing ${missing.map((o) => o.pin).join(", ")})`, e);
+    return { k: "return", outs: fields, span: this.sp(node) };
+  }
+
   /** `super.X(args)` inside `@override X`: the parent's implementation (Blueprint "Add Call to Parent Function"). */
   private superCall(node: ts.CallExpression, callee: ts.PropertyAccessExpression, sp: Span): HirExpr {
     const f: DiagSink = this.sink;
     const name = callee.name.text;
-    if (this.unitKind !== "override" || name !== this.unitName) {
+    if (!this.unitOverride || name !== this.unitName) {
       return f.fail("ABFC2099", `super.${name}() can only be called inside @override ${name} (it calls the parent's ${name})`, node);
     }
     const sym = this.checker.getSymbolAtLocation(callee.name);

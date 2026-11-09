@@ -149,7 +149,7 @@ function exits(list: HirStmt[]): boolean {
 function valueReturns(list: HirStmt[]): number {
   let n = 0;
   for (const s of list) {
-    if (s.k === "return") n += s.value !== undefined ? 1 : 0;
+    if (s.k === "return") n += s.value !== undefined || s.outs !== undefined ? 1 : 0;
     else if (s.k === "if") n += valueReturns(s.then) + valueReturns(s.else);
     else if (s.k === "forOf" || s.k === "forCount") n += valueReturns(s.body);
   }
@@ -185,7 +185,7 @@ export class UnitBuilder {
   /** Functions: the only value `return` is the last top-level statement, so its value can feed the result node directly. */
   private directReturn = false;
   /** Functions: the return temp `abfc_<name>_r` exists and is read by the result node. */
-  private returnTemp = false;
+  private returnTemps = new Set<string>();
   private readonly cross: NonNullable<IrUnit["crossWires"]> = [];
 
   constructor(
@@ -201,7 +201,7 @@ export class UnitBuilder {
       // no entry node is emitted: the backend's function entry and result nodes are addressed by the reserved ids `entry` and `result`
       this.entryId = "entry";
       const last = ev.body[ev.body.length - 1];
-      this.directReturn = valueReturns(ev.body) === 1 && last !== undefined && last.k === "return" && last.value !== undefined;
+      this.directReturn = valueReturns(ev.body) === 1 && last !== undefined && last.k === "return" && (last.value !== undefined || last.outs !== undefined);
     } else if (ev.kind === "override") {
       if (ev.overrideOf === undefined) throw new Error(`ABFC2060: override ${ev.name} has no declaring class`);
       const sem: SemanticTag = { k: "override", class: ev.overrideOf, function: ev.name };
@@ -224,8 +224,9 @@ export class UnitBuilder {
       graph: ev.kind === "function" ? ev.name : "EventGraph",
       signature: {
         inputs: ev.params.map((p) => ({ name: p.name, type: p.type })),
-        outputs: ev.kind === "function" && ev.returnType !== undefined ? [{ name: FUNCTION_RETURN_PIN, type: ev.returnType }] : [],
+        outputs: ev.kind !== "function" ? [] : ev.outputs !== undefined ? ev.outputs.map((o) => ({ name: o.name, type: o.type })) : ev.returnType !== undefined ? [{ name: FUNCTION_RETURN_PIN, type: ev.returnType }] : [],
         ...(ev.kind === "function" ? { access: ev.access ?? "public" } : {}),
+        ...(ev.kind === "function" && ev.overrideOf !== undefined ? { override: ev.overrideOf } : {}),
       },
       locals: [],
       nodes: this.nodes,
@@ -856,27 +857,34 @@ export class UnitBuilder {
         return;
       }
       case "return": {
-        if (s.value === undefined) {
+        if (s.value === undefined && s.outs === undefined) {
           this.cur = [];
           return;
         }
-        const type = this.event.returnType!;
-        const o = this.operand(s.value, type);
-        if (o.nulls.length > 0) this.unsupported("an optional chain (?.) in a return value; check isValid first", s.span);
-        if (this.directReturn && o.pin !== undefined) {
-          this.link(o.pin, `result.${FUNCTION_RETURN_PIN}`);
-        } else {
-          const temp = `abfc_${this.event.name}_r`;
-          if (!this.returnTemp) this.vars.push({ name: temp, type, flags: ["transient"], origin: s.span, temp: true });
+        const outs =
+          s.outs !== undefined
+            ? s.outs.map((x) => ({ pin: x.pin, value: x.value, type: this.event.outputs!.find((y) => y.name === x.pin)!.type }))
+            : [{ pin: FUNCTION_RETURN_PIN, value: s.value!, type: this.event.returnType! }];
+        for (const out of outs) {
+          const o = this.operand(out.value, out.type);
+          if (o.nulls.length > 0) this.unsupported("an optional chain (?.) in a return value; check isValid first", s.span);
+          if (this.directReturn && o.pin !== undefined) {
+            this.link(o.pin, `result.${out.pin}`);
+            continue;
+          }
+          // a value that is not a pin, or several returns: a temp per out pin, set before each return, read once into the result
+          const temp = out.pin === FUNCTION_RETURN_PIN ? `abfc_${this.event.name}_r` : `abfc_${this.event.name}_${out.pin}`;
+          const first = !this.returnTemps.has(out.pin);
+          if (first) this.vars.push({ name: temp, type: out.type, flags: ["transient"], origin: s.span, temp: true });
           const defaults: Record<string, string> = {};
           const objects: Record<string, string> = {};
           const set = this.setVar(temp, s.span);
           this.execInto(set);
           this.feed(o, set, temp, defaults, objects);
           this.settle(set, defaults, objects);
-          if (!this.returnTemp) {
-            this.returnTemp = true;
-            this.link(this.getVar(temp, s.span), `result.${FUNCTION_RETURN_PIN}`);
+          if (first) {
+            this.returnTemps.add(out.pin);
+            this.link(this.getVar(temp, s.span), `result.${out.pin}`);
           }
         }
         for (const x of this.cur) this.link(x, `result.${P.execute}`);
