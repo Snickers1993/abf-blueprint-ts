@@ -1,0 +1,7 @@
+{"at":"2026-01-02T03:04:05.000Z","step":"stubs.catalog","seconds":0.00019626499999992575,"ok":true,"units":3,"mode":"cold"}
+{"at":"2026-01-02T03:04:05.000Z","step":"stubs.read","seconds":0.000016550999999935813,"ok":true,"units":0,"mode":"cold"}
+{"at":"2026-01-02T03:04:05.000Z","step":"stubs.reflect","seconds":0.00011255500000004304,"ok":true,"units":19,"mode":"cold"}
+{"at":"2026-01-02T03:04:05.000Z","step":"stubs.emit","seconds":0.001926476999999977,"ok":true,"units":7,"mode":"cold"}
+{"at":"2026-01-02T03:04:05.000Z","step":"stubs.read","seconds":0.000024045999999998458,"ok":true,"units":0,"mode":"cold"}
+{"at":"2026-01-02T03:04:05.000Z","step":"stubs.reflect","seconds":0.00011219400000004498,"ok":true,"units":20,"mode":"cold"}
+{"at":"2026-01-02T03:04:05.000Z","step":"stubs.emit","seconds":0.0016527730000000247,"ok":true,"units":7,"mode":"cold"}

@@ -1,0 +1,23 @@
+{
+  "files": [
+    "Game/Fake/BP_Fake.d.ts",
+    "Script/CoreUObject.d.ts",
+    "Script/FakeEngine.d.ts",
+    "Script/UMG.d.ts"
+  ],
+  "members": 2,
+  "deprecated": [],
+  "overridden": [],
+  "missing": [],
+  "opaque": [
+    "/Script/UMG.TextBlock"
+  ],
+  "chainGaps": [],
+  "noSupers": [],
+  "opaqueNoParent": [
+    "/Script/UMG.TextBlock"
+  ],
+  "discovered": [
+    "/Game/Fake/BP_Fake.BP_Fake_C:TitleText (widget)"
+  ]
+}

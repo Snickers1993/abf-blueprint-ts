@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "reflected": [
+    "/Game/Fake/BP_Fake.BP_Fake_C",
+    "/Script/FakeEngine.FakeVec",
+    "/Script/FakeEngine.Thing"
+  ],
+  "declared": [
+    "/Game/Fake/BP_Fake.BP_Fake_C",
+    "/Script/FakeEngine.FakeVec",
+    "/Script/FakeEngine.Thing",
+    "/Script/UMG.TextBlock"
+  ],
+  "errors": []
+}

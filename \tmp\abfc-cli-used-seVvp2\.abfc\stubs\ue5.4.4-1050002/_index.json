@@ -1,0 +1,28 @@
+{
+  "files": [
+    "Game/Fake/BP_Fake.d.ts",
+    "Game/Fake/BP_Other.d.ts",
+    "Game/Fake/WBP_Hud.d.ts",
+    "Script/CoreUObject.d.ts",
+    "Script/Engine.d.ts",
+    "Script/FakeEngine.d.ts",
+    "Script/UMG.d.ts"
+  ],
+  "members": 2,
+  "deprecated": [],
+  "overridden": [],
+  "missing": [],
+  "opaque": [
+    "/Script/FakeEngine.Other"
+  ],
+  "chainGaps": [],
+  "noSupers": [
+    "/Game/Fake/BP_Fake.BP_Fake_C",
+    "/Game/Fake/BP_Other.BP_Other_C",
+    "/Game/Fake/WBP_Hud.WBP_Hud_C"
+  ],
+  "opaqueNoParent": [
+    "/Script/FakeEngine.Other"
+  ],
+  "discovered": []
+}

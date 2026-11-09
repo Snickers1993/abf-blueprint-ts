@@ -1,0 +1,18 @@
+{
+  "files": [
+    "Game/Fake/BP_Fake.d.ts",
+    "Script/CoreUObject.d.ts",
+    "Script/FakeEngine.d.ts"
+  ],
+  "members": 3,
+  "deprecated": [],
+  "overridden": [],
+  "missing": [],
+  "opaque": [
+    "/Script/FakeEngine.Opaq"
+  ],
+  "chainGaps": [],
+  "noSupers": [],
+  "opaqueNoParent": [],
+  "discovered": []
+}

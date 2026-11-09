@@ -1243,24 +1243,17 @@ function gunProject(dir: string): void {
   );
 }
 
-test("(S41) an @override of an event declared in a Blueprint class that comes out as a custom event fails the build (ABFC6003)", async () => {
+test("(S41) an @override of a member a Blueprint class declares is applied as a function graph that names the parent", async () => {
+  // GunStartFiring is a function in the game's gun Blueprint: an override event of it came out as a custom event (ABFC6003, PC run 9 Nov)
   await withRig({ handMadeEvent: false, overrideAsCustomEvent: true }, async (r) => {
-    gunProject(r.dir);
-    const x = await r.run(["build"]);
-    assert.equal(x.code, 1, x.out);
-    assert.match(x.out, /ABFC6003/);
-    assert.match(x.out, /custom event GunStartFiring_1/);
-  });
-});
-
-test("(S41b) the same override is fine when the backend keeps it an override event", async () => {
-  await withRig({ handMadeEvent: false }, async (r) => {
     gunProject(r.dir);
     const x = await r.run(["build"]);
     assert.equal(x.code, 0, x.out);
     assert.doesNotMatch(x.out, /ABFC6003/);
-    const ov = appliedSpecs(r).flatMap((s) => (s.graphs ?? []).flatMap((g: any) => g.add ?? [])).find((n: any) => n.k === "override");
-    assert.equal(ov?.class, "/Game/Fake/BP_FakeGun.BP_FakeGun_C");
-    assert.equal(ov?.function, "GunStartFiring");
+    const specs = appliedSpecs(r);
+    const fn = specs.flatMap((s) => s.functions ?? []).find((f: any) => f.name === "GunStartFiring");
+    assert.equal(fn?.override, "/Game/Fake/BP_FakeGun.BP_FakeGun_C");
+    assert.deepEqual(fn?.outputs, []);
+    assert.equal(specs.flatMap((s) => (s.graphs ?? []).flatMap((g: any) => g.add ?? [])).some((n: any) => n.k === "override"), false);
   });
 });

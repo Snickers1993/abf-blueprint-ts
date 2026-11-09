@@ -1,0 +1,15 @@
+{
+  "files": [
+    "Script/CoreUObject.d.ts",
+    "Script/FakeEngine.d.ts"
+  ],
+  "members": 1,
+  "deprecated": [],
+  "overridden": [],
+  "missing": [],
+  "opaque": [],
+  "chainGaps": [],
+  "noSupers": [],
+  "opaqueNoParent": [],
+  "discovered": []
+}

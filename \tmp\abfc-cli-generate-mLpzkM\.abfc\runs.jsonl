@@ -1,0 +1,3 @@
+{"at":"2026-01-02T03:04:05.000Z","step":"stubs.read","seconds":0.0016406779999999798,"ok":true,"units":1,"mode":"cold"}
+{"at":"2026-01-02T03:04:05.000Z","step":"stubs.reflect","seconds":0.0004911540000000513,"ok":true,"units":1,"mode":"cold"}
+{"at":"2026-01-02T03:04:05.000Z","step":"stubs.emit","seconds":0.0030786339999999655,"ok":true,"units":3,"mode":"cold"}

@@ -6,7 +6,8 @@ import { dirname, join } from "node:path";
 // docs/errors.md has one `### ABFCnnnn` section for every error code in the sources, and no section for a code that is gone.
 
 /** Codes whose section is kept on purpose although no source uses them (the section says "retired"). */
-const RETIRED: readonly string[] = [];
+// codes whose section stays in docs/errors.md (marked Retired) so an old message can still be looked up
+const RETIRED: readonly string[] = ["2063"];
 
 function repoRoot(): string {
   let dir = process.cwd();

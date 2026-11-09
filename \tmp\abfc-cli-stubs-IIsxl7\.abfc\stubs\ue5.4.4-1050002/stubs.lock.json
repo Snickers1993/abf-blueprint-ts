@@ -1,0 +1,40 @@
+{
+  "generator": "0.7.0",
+  "profile": "ue5.4.4-1050002",
+  "engineVersion": "5.4.4-fake",
+  "modEditorVersion": "1.5.0",
+  "editorFingerprint": "c5faa65884f2bc0355ec273178e1008e1440af140cd43209f1c9a949fcb00ea5",
+  "filterContentVersion": "v1",
+  "classes": [
+    "/Game/Fake/BP_Fake.BP_Fake_C"
+  ],
+  "scriptClasses": [
+    "/Script/FakeEngine.Thing"
+  ],
+  "modAssets": [],
+  "widgetMembers": {},
+  "auto": {
+    "catalogSha256": "",
+    "gameClasses": 0,
+    "failed": [
+      "/Script/Engine.Actor",
+      "/Script/Engine.ActorComponent",
+      "/Script/Engine.Controller",
+      "/Script/Engine.GameplayStatics",
+      "/Script/Engine.KismetArrayLibrary",
+      "/Script/Engine.KismetMathLibrary",
+      "/Script/Engine.KismetSystemLibrary",
+      "/Script/Engine.KismetTextLibrary",
+      "/Script/Engine.Pawn",
+      "/Script/Engine.PlayerController",
+      "/Script/UMG.PanelSlot",
+      "/Script/UMG.PanelWidget",
+      "/Script/UMG.UserWidget",
+      "/Script/UMG.Widget",
+      "/Script/UMG.WidgetBlueprintLibrary"
+    ],
+    "added": [],
+    "noCatalog": "7f1a4ac865317b25"
+  },
+  "createdAt": "2026-01-02T03:04:05.000Z"
+}

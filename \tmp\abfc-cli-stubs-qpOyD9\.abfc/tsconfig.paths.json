@@ -1,0 +1,27 @@
+{
+  "files": [
+    "./tags.d.ts"
+  ],
+  "compilerOptions": {
+    "paths": {
+      "/Script/*": [
+        "./stubs/ue5.4.4-1050002/Script/*.js"
+      ],
+      "/Game/*": [
+        "./stubs/ue5.4.4-1050002/Game/*.js"
+      ],
+      "/TestMod/*": [
+        "./stubs/ue5.4.4-1050002/Mod/TestMod/*.js"
+      ],
+      "@mod/*": [
+        "./stubs/ue5.4.4-1050002/Mod/TestMod/*.js"
+      ],
+      "@abfc/runtime": [
+        "/home/user/abf-blueprint-ts/packages/runtime/dist/src/index.d.ts"
+      ],
+      "@abfc/testkit": [
+        "/home/user/abf-blueprint-ts/packages/testkit/dist/src/index.d.ts"
+      ]
+    }
+  }
+}

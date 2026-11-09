@@ -1,0 +1,26 @@
+{
+  "generator": "0.7.0",
+  "profile": "ue5.4.4-1050002",
+  "engineVersion": null,
+  "modEditorVersion": "1.5.0",
+  "editorFingerprint": "fingerprint-1",
+  "filterContentVersion": null,
+  "classes": [],
+  "scriptClasses": [],
+  "modAssets": [],
+  "auto": {
+    "catalogSha256": "x",
+    "gameClasses": 3,
+    "failed": [],
+    "added": [
+      "/Script/FakeEngine.Thing",
+      "/Script/FakeEngine.Other",
+      "/Script/FakeEngine.FakeVec",
+      "/Script/FakeEngine.EFake",
+      "/Script/FakeEngine.Actor2",
+      "/Game/Fake/Sub/WBP_Hud.WBP_Hud_C",
+      "/Game/Fake/BP_Fake.BP_Fake_C"
+    ]
+  },
+  "createdAt": "2026-01-02T00:00:00.000Z"
+}

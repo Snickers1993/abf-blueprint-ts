@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "reflected": [
+    "/Script/FakeEngine.FakeVec",
+    "/Script/FakeEngine.Thing"
+  ],
+  "declared": [
+    "/Script/FakeEngine.FakeVec",
+    "/Script/FakeEngine.Thing"
+  ],
+  "errors": []
+}

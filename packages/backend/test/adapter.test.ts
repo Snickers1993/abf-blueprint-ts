@@ -393,3 +393,19 @@ test("a removed function graph has no graph entry; a recreated empty one has non
   assert.deepEqual(spec2.functions!.map((f) => f.name), ["noop"]);
   assert.deepEqual(spec2.graphs, []);
 });
+
+test("interfaces: an interface function graph goes to its interface entry, not to functions; components carry ensure and values", () => {
+  const IF = "/Game/Fake/I_Use.I_Use_C";
+  const a = fnAsset({
+    interfaces: [IF],
+    functions: [
+      { name: "CanUse", inputs: [], outputs: [{ name: "ReturnValue", type: "bool" }], access: "public", override: IF },
+      { name: "Own", inputs: [], outputs: [], access: "public" },
+    ],
+    components: [{ name: "Lid", class: "/Script/Engine.StaticMeshComponent", attachTo: "Mesh", props: { bHiddenInGame: { k: "bool", v: true } }, origin: unit.origin }],
+  });
+  const spec = renderMainSpec(a, caps(true, true), profile);
+  assert.deepEqual(spec.functions?.map((f) => f.name), ["Own"]);
+  assert.deepEqual(spec.interfaces, [{ class: IF, functions: [{ name: "CanUse", inputs: [], outputs: [{ name: "ReturnValue", type: "bool" }] }] }]);
+  assert.deepEqual(spec.components, [{ name: "Lid", class: "/Script/Engine.StaticMeshComponent", parent: "Mesh", ensure: true, values: { bHiddenInGame: { k: "bool", v: true } } }]);
+});

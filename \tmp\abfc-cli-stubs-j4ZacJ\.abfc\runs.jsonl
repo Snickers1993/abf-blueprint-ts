@@ -1,0 +1,4 @@
+{"at":"2026-01-02T03:04:05.000Z","step":"stubs.catalog","seconds":0.00022942399999999452,"ok":true,"units":3,"mode":"cold"}
+{"at":"2026-01-02T03:04:05.000Z","step":"stubs.read","seconds":0.000014034999999921638,"ok":true,"units":0,"mode":"cold"}
+{"at":"2026-01-02T03:04:05.000Z","step":"stubs.reflect","seconds":0.0016153899999999338,"ok":true,"units":19,"mode":"cold"}
+{"at":"2026-01-02T03:04:05.000Z","step":"stubs.emit","seconds":0.0037187770000000455,"ok":true,"units":7,"mode":"cold"}
