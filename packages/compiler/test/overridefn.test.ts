@@ -126,3 +126,50 @@ test("an outputs override returns an object literal (TypeScript checks its field
   const plain = build(SOURCE.replace("return { ConsumedByWeapon: true };", "return true as never;"));
   assert.ok(plain.diagnostics.some((d) => /returns its outputs as an object literal/.test(d.message)), JSON.stringify(plain.diagnostics));
 });
+
+// A Blueprint parent (a /Game class) whose overridable member has no outputs: in the editor it is a function, not an event.
+const GAME_STUB = `import { Actor } from "/Script/FakeEngine";
+/**
+ * @bpPath /Game/Fake/BP_FakeGun.BP_FakeGun_C
+ * @bpMeta /Script/Engine.BlueprintGeneratedClass
+ */
+export declare class BP_FakeGun_C extends Actor {
+  /**
+   * @bpPath /Game/Fake/BP_FakeGun.BP_FakeGun_C:StartFiring
+   */
+  StartFiring(): void;
+}
+`;
+
+test("an @override of a member a Blueprint class declares, without outputs, is a function graph too", () => {
+  const dir = mkdtempSync(join(here, "ovgame-"));
+  try {
+    cpSync(phase2Dir, dir, { recursive: true });
+    for (const f of ["Phase2Bad.ts", "Counter.ts", "Director.ts"]) rmSync(join(dir, "src", f));
+    writeFileSync(join(dir, ".abfc", "stubs", "test", "Game", "Fake", "BP_FakeGun.d.ts"), GAME_STUB, "utf8");
+    writeFileSync(join(dir, "src", "Gun.ts"), `import { blueprint, override } from "@abfc/runtime";
+import type { int } from "@abfc/runtime";
+import { BP_FakeGun_C } from "/Game/Fake/BP_FakeGun";
+@blueprint({ path: "/TestMod/Gun/BP_Gun" })
+export class BP_Gun extends BP_FakeGun_C {
+  Fired: int = 0;
+  @override
+  override StartFiring(): void {
+    this.Fired = this.Fired + 1;
+  }
+}
+`, "utf8");
+    const loaded = loadProgram(dir);
+    assert.deepEqual(loaded.diagnostics, []);
+    const hir = buildHir(loaded, { mod: "TestMod" }, profile);
+    assert.deepEqual(hir.diagnostics, []);
+    const ir = lower(hir, profile);
+    assert.deepEqual(validateIrModule(ir), []);
+    const u = ir.assets[0]!.units.find((x) => x.name === "StartFiring")!;
+    assert.equal(u.kind, "function");
+    assert.equal(u.signature.override, "/Game/Fake/BP_FakeGun.BP_FakeGun_C");
+    assert.deepEqual(u.signature.outputs, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
