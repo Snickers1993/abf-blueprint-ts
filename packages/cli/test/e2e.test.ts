@@ -2890,6 +2890,7 @@ test("(h2) test options and waitUntil: map and timeout reach bp_game_test; witho
     '  b.call("UpdateTarget");',
     '  t.waitUntil(b.get("Visible"), { timeout: 4 }).equals(false);',
     "  t.expect(t.distance(a, b)).below(5000);",
+    '  t.note("where", t.distance(a, b));',
     "});",
     "",
   ].join("\n");
@@ -2900,13 +2901,14 @@ test("(h2) test options and waitUntil: map and timeout reach bp_game_test; witho
       writeFileSync(join(r.dir, "src", "Settle.test.ts"), body, "utf8");
       const x = await r.run(["test", "--no-build"]);
       assert.equal(x.code, 0, x.out);
-      assert.match(x.out, /PASS relay settles \(7\/7/);
+      assert.match(x.out, /PASS relay settles \(8\/8/);
+      assert.match(x.out, /note src\/Settle\.test\.ts:11 where: null/);
       assert.equal(/warning ABFC6106/.test(x.out), !until, x.out);
       assert.equal(r.backend.gameTestRuns.length, 1);
       const run = r.backend.gameTestRuns[0]!;
       assert.deepEqual(run.o, { timeoutSeconds: 400, map: "/Game/Maps/Facility" });
       const ops = run.steps.map((s) => (s as { op: string }).op);
-      assert.deepEqual(ops, until ? ["find", "spawn", "python", "call", "until", "python", "assert"] : ["find", "spawn", "python", "call", "wait", "get", "assert", "python", "python"]);
+      assert.deepEqual(ops, until ? ["find", "spawn", "python", "call", "until", "python", "assert", "python"] : ["find", "spawn", "python", "call", "wait", "get", "assert", "python", "python", "python"]);
     });
   }
 });

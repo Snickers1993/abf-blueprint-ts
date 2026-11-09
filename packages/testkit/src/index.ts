@@ -77,6 +77,8 @@ export interface TestContext {
   wait(seconds: number): void;
   python(code: string, o?: { knownIssue?: string }): Value<unknown>;
   expect<T>(v: Value<T>): Expectation<T>;
+  /** Prints `v` (read when the step runs) under `label` in the test's output, whether the test passes or fails. */
+  note(label: string, v: Value<unknown>): void;
 }
 
 export interface TestFn {

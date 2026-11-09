@@ -181,6 +181,7 @@ Builds (unless `--no-build`), compiles the tests of the project and runs each on
 | `h.moveTo(x, y, z)`, `h.moveTo(other)`, `h.aim(pitch, yaw)` | teleports an actor; turns it and its controller's view (the player's camera follows) |
 | `t.distance(a, b)` | the distance between two actors (cm) |
 | `t.wait(s)`, `t.python(code)` | waits; runs Python in the game (`ctx[name]` holds the values, `result` is the value) |
+| `t.note("label", v)` | prints `v` (a variable or an inline `h.get`, `h.call`, `t.distance`, `t.python`) in the output as `note <file>:<line> label: <value>`, pass or fail; a note never fails the test |
 | `t.expect(v).equals / approx / contains / truthy / notNone / below / above` | checks a value once |
 | `t.waitUntil(v, { timeout, every }).equals(...)` | looks at an inline `h.get`, `h.call`, `t.distance` or `t.python` again and again until the check holds; fails after `timeout` (default 10 s) |
 

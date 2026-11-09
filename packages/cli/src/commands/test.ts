@@ -89,6 +89,12 @@ export async function runTestsWithSummary(
     const ev = evaluateTest(tc, report);
     rec.record(`test.${tc.name}`, since(t0), ev.passed, tc.steps.length);
     output.info(`${ev.passed ? "PASS" : "FAIL"} ${tc.name} (${ev.summary.ok}/${tc.steps.length}, ${report.seconds.toFixed(1)} s)`, ev.passed ? "ok" : "fail");
+    for (const [k, rec] of tc.steps.entries()) {
+      if (rec.note === undefined) continue;
+      const got = report.steps.find((s) => s.i === k);
+      const shown = got === undefined ? "(not reached)" : got.error !== undefined ? `error: ${got.error}` : JSON.stringify(got.value) ?? String(got.value);
+      output.info(`  note ${tc.file}:${rec.span.line} ${rec.note}: ${shown}`);
+    }
     for (const d of ev.diagnostics) output.diag(d);
     if (!ev.passed) failed++;
     results.push({ name: tc.name, passed: ev.passed, ok: ev.summary.ok, steps: tc.steps.length, seconds: report.seconds });

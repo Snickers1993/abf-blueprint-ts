@@ -268,6 +268,10 @@ class TestCompiler {
         this.add(top.call, { op: "python", code }, known);
         return;
       }
+      if (top.name === "note") {
+        this.note(top.call);
+        return;
+      }
       this.sink.fail("ABFC2101", `t.${top.name} is not supported as a statement`, e);
     }
     if (this.refName(top.recv) !== undefined) {
@@ -275,6 +279,25 @@ class TestCompiler {
       return;
     }
     this.assertion(e);
+  }
+
+  /** `t.note("label", v)`: reads `v` (a variable, or an inline h.get/h.call/t.distance/t.python) for the run's output. */
+  private note(call: ts.CallExpression): void {
+    const label = this.strArg(call.arguments[0], "the note label", call);
+    const v = call.arguments[1];
+    if (!v) this.sink.fail("ABFC2102", "t.note needs a label and a value", call);
+    let step: Record<string, unknown> | undefined;
+    const ref = this.refName(v);
+    if (ref !== undefined) step = { op: "python", code: `result = ctx[${py(ref)}]` };
+    else {
+      const inner = this.method(v);
+      if (inner && this.refName(inner.recv) !== undefined) step = this.probeStep(inner.call, inner.recv, inner.name);
+      else if (inner && this.isT(inner.recv) && inner.name === "distance") step = this.distanceStep(inner.call);
+      else if (inner && this.isT(inner.recv) && inner.name === "python") step = { op: "python", code: this.python(inner.call).code };
+    }
+    if (step === undefined) this.sink.fail("ABFC2102", "t.note needs a variable or an inline h.get(...), h.call(...), t.distance(...) or t.python(...)", v);
+    this.add(call, step);
+    this.steps[this.steps.length - 1]!.note = label;
   }
 
   /** `t.expect(X).equals(v)` or `t.waitUntil(X, { timeout }).equals(v)`, with an optional trailing `.knownIssue(reason)`. */

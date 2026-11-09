@@ -104,3 +104,27 @@ test("waitUntil refuses a variable (one reading), test options are checked", () 
   assert.match(diagnostics[0]!.message, /inline h\.get/);
   assert.deepEqual(cases.map((c) => c.name), ["bad"]);
 });
+
+test("t.note reads a variable or an inline probe and labels the step", () => {
+  const src = `import { test } from "@abfc/testkit";
+import { BP_Relay } from "./Relay.js";
+
+test("notes", (t) => {
+  const r = t.spawn(BP_Relay);
+  t.note("visible", r.get("Visible"));
+  const d = t.distance(r, r);
+  t.note("d", d);
+  t.note("py", t.python("result = 2"));
+});
+`;
+  const { cases, diagnostics } = compile({ "Notes.test.ts": src });
+  assert.deepEqual(diagnostics, []);
+  const steps = cases[0]!.steps;
+  assert.deepEqual(steps.map((s) => [s.note, s.step]), [
+    [undefined, { op: "spawn", class: "/TestMod/Relay/BP_Relay.BP_Relay_C", as: "r" }],
+    ["visible", { op: "get", target: "$r", property: "Visible" }],
+    [undefined, { op: "python", code: `result = ctx["r"].get_distance_to(ctx["r"])`, as: "d" }],
+    ["d", { op: "python", code: `result = ctx["d"]` }],
+    ["py", { op: "python", code: "result = 2" }],
+  ]);
+});

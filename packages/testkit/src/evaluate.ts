@@ -59,6 +59,11 @@ export function evaluateTest(tc: TestCase, r: GameTestReportLike): TestEvaluatio
       }
       return;
     }
+    // a note only reports what it read (the CLI prints it): its failure is not the test's
+    if (rec.note !== undefined) {
+      summary.ok++;
+      return;
+    }
     const known = rec.knownIssue;
     if (known !== undefined) summary.knownIssues++;
     if (got.ok) {
