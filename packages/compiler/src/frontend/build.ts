@@ -192,6 +192,8 @@ const ARRAY_MUTATORS = new Set(["push", "splice"]);
 
 /** A property with neither a type annotation nor `!` (`Score = 1;`) is not an own-field attempt: it keeps the generic ABFC2099. */
 function isLegacyProperty(m: ts.PropertyDeclaration): boolean {
+  if (m.initializer !== undefined && ts.isCallExpression(stripParens(m.initializer)) && ts.isIdentifier((stripParens(m.initializer) as ts.CallExpression).expression)
+    && ((stripParens(m.initializer) as ts.CallExpression).expression as ts.Identifier).text === "component") return false; // `Name = component(...)`
   return m.type === undefined && m.exclamationToken === undefined;
 }
 
@@ -451,7 +453,8 @@ class HirBuilder {
     // Own fields first: an event body may use a field declared further down.
     for (const m of node.members) {
       if (!ts.isPropertyDeclaration(m) || isLegacyProperty(m) || (ts.isIdentifier(m.name) && this.isDesignerWidget(node, m.name.text))) continue;
-      const field = this.ownField(node, m);
+      const isComp = m.initializer !== undefined && ts.isCallExpression(stripParens(m.initializer)) && runtimeName(this.checker, stripParens(m.initializer) as ts.CallExpression) === "component";
+      const field = isComp ? this.componentField(node, m) : this.ownField(node, m);
       if (field === undefined) continue;
       cls.fields.push(field);
       const fsym = this.checker.getSymbolAtLocation(m.name);
@@ -782,6 +785,71 @@ class HirBuilder {
    * the variable's default. Reports ABFC2047 and returns undefined for any other property declaration, an initializer that is not a
    * literal of the field type, a type without a Blueprint equivalent, or a name that collides with an inherited member.
    */
+  /** `Name = component(Class, { Prop: value }, { attachTo: "Other" })`: a component of the Actor class (not a member variable). */
+  private componentField(node: ts.ClassDeclaration, m: ts.PropertyDeclaration): HirField | undefined {
+    const shown = m.name.getText();
+    const bad = (why: string, at: ts.Node = m.name): undefined => {
+      this.sink.error("ABFC2105", `component ${shown}: ${why}`, at);
+      return undefined;
+    };
+    if (!ts.isIdentifier(m.name)) return bad("a component is declared as `Name = component(Class, { props }, { attachTo })`");
+    const mods = (ts.getModifiers(m) ?? []).filter((x) => x.kind !== ts.SyntaxKind.PublicKeyword && x.kind !== ts.SyntaxKind.ReadonlyKeyword);
+    if (mods.length > 0 || m.questionToken !== undefined || m.exclamationToken !== undefined || (ts.getDecorators(m) ?? []).length > 0) {
+      return bad("a component is declared as `Name = component(Class, { props }, { attachTo })` (no decorators, static or `?`)");
+    }
+    if (this.cls.family !== "actor") return bad("only an Actor class has components");
+    const call = stripParens(m.initializer!) as ts.CallExpression;
+    const [clsArg, propsArg, optsArg] = call.arguments;
+    const ci = this.classArg(clsArg);
+    if (!ci || ci.kind !== "class") return bad("the first argument must be a component class from the stubs", clsArg ?? call);
+    const ctype = this.checker.getDeclaredTypeOfSymbol(ci.sym);
+    if (!this.derivesFromComponent(ctype)) return bad(`${ci.path} is not an ActorComponent`, clsArg!);
+    const csym = node.name ? this.checker.getSymbolAtLocation(node.name) : undefined;
+    const own = csym ? this.checker.getDeclaredTypeOfSymbol(csym) : undefined;
+    if (own?.isClassOrInterface() && this.checker.getBaseTypes(own).some((b) => this.checker.getPropertyOfType(b, m.name.getText()) !== undefined)) {
+      return bad("the name collides with a member of the parent class or a hand-made member of the asset; rename the component");
+    }
+    this.classMeta[ci.path] = ci.meta;
+    const props: Record<string, unknown> = {};
+    if (propsArg !== undefined && propsArg.kind !== ts.SyntaxKind.UndefinedKeyword && !(ts.isIdentifier(propsArg) && propsArg.text === "undefined")) {
+      const pl = stripParens(propsArg);
+      if (!ts.isObjectLiteralExpression(pl)) return bad("the properties must be an object literal", propsArg);
+      for (const p of pl.properties) {
+        if (!ts.isPropertyAssignment(p) || !(ts.isIdentifier(p.name) || ts.isStringLiteral(p.name))) return bad("only `Property: value` entries are supported", p);
+        const psym = this.checker.getPropertyOfType(ctype, p.name.text);
+        const pt = psym ? (bpTypeOfMember(psym) ?? bpTypeOf(this.checker, this.checker.getTypeOfSymbol(psym))) : undefined;
+        if (!psym || pt === undefined) return bad(`${ci.path} has no Blueprint property ${p.name.text}`, p.name);
+        const pname = splitMemberPath(bpPathOf(psym) ?? "")?.name ?? p.name.text;
+        try {
+          props[pname] = this.cdoValue(p.initializer, pt, `${shown}.${p.name.text}`);
+        } catch (e) {
+          if (e instanceof Fail) return undefined;
+          throw e;
+        }
+      }
+    }
+    let attachTo: string | undefined;
+    if (optsArg !== undefined) {
+      const ol = stripParens(optsArg);
+      if (!ts.isObjectLiteralExpression(ol)) return bad("the options must be an object literal ({ attachTo: \"Name\" })", optsArg);
+      for (const p of ol.properties) {
+        const key = ts.isPropertyAssignment(p) && ts.isIdentifier(p.name) ? p.name.text : undefined;
+        if (key !== "attachTo" || !ts.isPropertyAssignment(p) || !(ts.isStringLiteral(p.initializer) || ts.isNoSubstitutionTemplateLiteral(p.initializer))) {
+          return bad("the only option is attachTo: \"<component name>\" (a string literal)", p);
+        }
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(p.initializer.text)) return bad("attachTo must name a component", p.initializer);
+        attachTo = p.initializer.text;
+      }
+    }
+    if (call.arguments.length > 3) return bad("component(Class, props, options) takes at most three arguments", call);
+    return {
+      name: m.name.text,
+      type: `object:${ci.path}`,
+      span: this.sp(m.name),
+      component: { class: ci.path, props, ...(attachTo !== undefined ? { attachTo } : {}) },
+    };
+  }
+
   private ownField(node: ts.ClassDeclaration, m: ts.PropertyDeclaration): HirField | undefined {
     const shown = m.name.getText();
     const bad = (why: string): undefined => {
@@ -1417,6 +1485,7 @@ class HirBuilder {
     const sym = this.checker.getSymbolAtLocation(left.name);
     if (!sym) return f.fail("ABFC2060", `member ${left.name.text} has no Blueprint metadata (@bpPath)`, left.name);
     const ownF = this.ownFields.get(sym);
+    if (ownF?.component !== undefined) return f.fail("ABFC2105", `component ${ownF.name} cannot be assigned; set its properties in component(...) or call its functions`, left.name);
     const type = ownF?.type ?? bpTypeOfMember(sym);
     if (type === undefined) {
       if (bpPathOf(sym) === undefined) f.fail("ABFC2060", `member ${left.name.text} has no Blueprint metadata (@bpPath)`, left.name);
@@ -2109,6 +2178,7 @@ class HirBuilder {
       if (rt === "createWidget") return this.createWidgetExpr(node, sp);
       if (rt === "getWorldSubsystem") return this.subsystemExpr(node, sp);
       if (rt === "spawnActor") return this.spawnExpr(node, sp);
+      if (rt === "component") return f.fail("ABFC2105", "component(Class, ...) is only valid as the initializer of a field of an Actor class", node);
       if (rt === "message") return f.fail("ABFC2099", "message(obj, Interface) is only valid as the target of a call of an interface function: message(obj, I_X_C).Fn(...)", node);
       if (callee.text === "eval") return f.fail("ABFC2020", "eval is not supported", node);
       return f.fail("ABFC2099", `call of "${callee.text}" is not supported`, node);

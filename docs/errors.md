@@ -887,6 +887,16 @@ Typical cause: `interfaces: I_Interactable_C` without the brackets, a string pat
 
 Fix: write `@blueprint({ interfaces: [I_Interactable_C] })` with the class imported from its stub (run `abfc generate --add <class path>` if there is none).
 
+### ABFC2105
+
+Severity: error · Exit: 1
+
+Meaning: a component field is not written as `Name = component(Class, { Prop: value }, { attachTo: "Other" })`, its class is not an ActorComponent, a property is unknown or has a value a class default cannot hold, the class is not an Actor, or the code assigns the component.
+
+Typical cause: `this.Mesh = ...` on a component field, a misspelled property name, or `component(...)` used outside a field initializer.
+
+Fix: set the component's properties in `component(...)`, change it at run time through its functions (`this.Mesh.SetVisibility(false)`), and keep the call as the field's initializer.
+
 ### ABFC3001
 
 Severity: error in `abfc build` and `abfc publish`, warning in `abfc check` · Exit: 2 (error), - (warning). The generator-version variant is always a warning.

@@ -48,6 +48,8 @@ export interface BpApplyAssetSpec {
   functions?: Array<{ name: string; inputs: IrParam[]; outputs: IrParam[]; access?: "public" | "protected" | "private"; /** Overrides the parent function of this name: the generated class path of the class that declares it (backend feature `override_functions`). */ override?: string }>;
   /** Backend bp_apply feature `interfaces`: generated class paths of Blueprint interfaces the class implements; missing ones are added before the graphs. */
   interfaces?: string[];
+  /** Backend bp_apply feature `components`: components to create (when missing) and whose template properties to set, before the graphs. Props are field-default JSON values (kinds none/bool/num/str/name/text/asset/class/struct/array). */
+  components?: Array<{ name: string; class: string; attach_to?: string; props: Record<string, unknown> }>;
   graphs?: BpGraphSpec[];
   raw?: Array<{ kind: "graph"; graph: string; text: string } | { kind: "python"; code: string }>;
   /** Backend 2.5.0 (bp_apply feature `class_manager_row`): write the class-manager row of a `@director` class after the Blueprints are saved. */
@@ -165,6 +167,9 @@ export function renderMainSpec(a: AssetPlan, caps: BackendCapabilities, profile:
   // A missing asset is created by the first spec that names it; `if_missing` keeps a repeated apply (the fallback route runs two) idempotent.
   if (a.create !== undefined) spec.create = { class: a.create.class, parent: a.create.parent, if_missing: true };
   if ((a.interfaces?.length ?? 0) > 0) spec.interfaces = [...a.interfaces!];
+  if ((a.components?.length ?? 0) > 0) {
+    spec.components = a.components!.map((c) => ({ name: c.name, class: c.class, ...(c.attachTo !== undefined ? { attach_to: c.attachTo } : {}), props: c.props }));
+  }
   if (a.variables.length > 0) {
     spec.variables = a.variables.map((v) => ({
       name: v.name,

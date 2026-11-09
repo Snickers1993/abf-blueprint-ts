@@ -12,7 +12,8 @@ export const FUNCTION_RETURN_PIN = "ReturnValue";
 export type ParentFamily = "actor" | "component" | "widget" | "object";
 
 /** An own member variable (`Name!: T;` or `Name: T = <literal>` in the TS class); abfc declares it in the asset. `default` is Unreal default-value text. */
-export interface HirField { name: string; type: BpType; default?: string; span: Span }
+/** `component`: the field is a component (`Name = component(Class, props, { attachTo })`), not a member variable; `props` are field-default JSON values by property name. */
+export interface HirField { name: string; type: BpType; default?: string; span: Span; component?: { class: string; props: Record<string, unknown>; attachTo?: string } }
 
 export interface HirClass {
   name: string;

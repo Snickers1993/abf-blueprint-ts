@@ -102,6 +102,17 @@ export declare function event(m: (this: any, ...a: any[]) => void, ctx: ClassMet
 export declare function override(m: (this: any, ...a: any[]) => void, ctx: ClassMethodDecoratorContext): void;
 export declare function createWidget<T>(cls: abstract new (...a: never[]) => T, owningPlayer: object | null): T;
 export declare function spawnActor<T>(cls: abstract new (...a: never[]) => T, opts?: SpawnOptions): T;
+export interface ComponentOptions {
+  /** Name of the component this one is attached to (another component field, or a component of the parent class). Default: the root. */
+  attachTo?: string;
+}
+/**
+ * A component of an Actor class, as a field initializer: `Mesh = component(StaticMeshComponent, { StaticMesh: asset(StaticMesh, "@mod/SM_Crate"),
+ * RelativeLocation: { X: 0, Y: 0, Z: 50 } }, { attachTo: "Root" })`. The backend adds it to the Blueprint's components and sets
+ * the properties on its template (values as for a field default: literals, asset(...), a class, native struct literals, arrays).
+ * The field reads the component (`this.Mesh.SetVisibility(...)`); it cannot be assigned.
+ */
+export declare function component<T>(cls: abstract new (...a: never[]) => T, props?: { [K in keyof T]?: T[K] }, opts?: ComponentOptions): T;
 /**
  * Calls an interface function on any object (Blueprint interface "Message" node): `message(actor, I_Interactable_C).InteractWith_A(me, null)`.
  * Nothing happens (and outputs are defaults) when the object does not implement the interface; no cast is needed. Only as the

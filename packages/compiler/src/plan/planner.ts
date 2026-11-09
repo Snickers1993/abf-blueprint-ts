@@ -741,6 +741,7 @@ export function planBuild(ir: IrModule, input: PlanInput): PlanResult {
       units,
       classMeta: ir.classMeta,
       ...(asset.interfaces !== undefined && asset.interfaces.length > 0 ? { interfaces: [...asset.interfaces] } : {}),
+      ...(asset.components !== undefined && asset.components.length > 0 ? { components: asset.components } : {}),
       ...(Object.keys(entryNames).length > 0 ? { entryNames } : {}),
       ...(defaults !== undefined ? { defaults } : {}),
       ...(removeUnits.length > 0 ? { removeUnits } : {}),

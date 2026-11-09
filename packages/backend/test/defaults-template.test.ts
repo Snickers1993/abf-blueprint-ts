@@ -189,3 +189,15 @@ test("field defaults travel as one JSON string read by the fixed helper", () => 
     ["Spots", { k: "array", items: [{ k: "struct", name: "Vector", fields: { X: { k: "num", v: 1 }, Y: { k: "num", v: 2 }, Z: { k: "num", v: 3 } } }] }],
   ]);
 });
+
+test("the structure hash key writes nothing and must be a hex hash", () => {
+  const code = renderDefaultsCode(CLASS, { "abfc:structure": "0123456789abcdef0123456789abcdef" });
+  assert.doesNotMatch(code, /abfc:structure/);
+  assert.throws(() => renderDefaultsCode(CLASS, { "abfc:structure": "x\")\nimport os" }), /hex hash/);
+});
+
+test("a field default is set by its Unreal name, then by the Python name derived from it", () => {
+  const code = renderDefaultsCode(CLASS, { "field:bHidden": JSON.stringify({ k: "bool", v: true }) });
+  assert.match(code, /^def _abfc_set\(o, n, v\):$/m);
+  assert.match(code, /^    _abfc_set\(cdo, _n, _abfc_val\(_v\)\)$/m);
+});

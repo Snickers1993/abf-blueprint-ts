@@ -29,8 +29,19 @@ export const DEFAULT_KINDS: Readonly<Record<string, DefaultKind>> = {
 const FIELD_KEY = /^field:([A-Za-z_][A-Za-z0-9_]*)$/;
 const OBJECT_PATH = /^\/[A-Za-z0-9_]+(\/[A-Za-z0-9_]+)*\.[A-Za-z0-9_]+$/;
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
+/** Class-defaults key holding a hash of the components and interfaces (see the compiler); skipped by the template. */
+export const STRUCTURE_KEY = "abfc:structure";
+
 const FIELD_HELPER = [
   "import json",
+  "import re",
+  // a property is found by its Unreal name first, then by the Python name Unreal derives from it (bHidden -> hidden, RelativeLocation -> relative_location)
+  "def _abfc_set(o, n, v):",
+  "    try:",
+  "        o.set_editor_property(n, v)",
+  "    except Exception:",
+  "        p = n[1:] if re.match(r'^b[A-Z]', n) else n",
+  "        o.set_editor_property(re.sub(r'(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])', '_', p).lower(), v)",
   "def _abfc_val(v):",
   "    k = v['k']",
   "    if k == 'none':",
@@ -54,7 +65,7 @@ const FIELD_HELPER = [
   "    if k == 'struct':",
   "        s = getattr(unreal, v['name'])()",
   "        for f, x in v['fields'].items():",
-  "            s.set_editor_property(f, _abfc_val(x))",
+  "            _abfc_set(s, f, _abfc_val(x))",
   "        return s",
   "    if k == 'array':",
   "        return [_abfc_val(x) for x in v['items']]",
@@ -122,6 +133,11 @@ export function renderDefaultsCode(classPath: string, values: Readonly<Record<st
       fields.push([fm[1]!, parsed]);
       continue;
     }
+    // a hash of the asset's components and interfaces: only makes a changed structure re-plan the asset, nothing to write here
+    if (key === STRUCTURE_KEY) {
+      if (!/^[0-9a-f]{16,64}$/.test(values[key]!)) throw bad(`${STRUCTURE_KEY} must be a hex hash`);
+      continue;
+    }
     const kind = DEFAULT_KINDS[key];
     const value = values[key]!;
     if (kind === undefined) throw bad(`class default "${key}" is not supported`);
@@ -144,7 +160,7 @@ export function renderDefaultsCode(classPath: string, values: Readonly<Record<st
   }
   if (fields.length > 0) {
     // the values travel as one JSON string literal and are rebuilt by the fixed helper: no program text becomes code
-    lines.push(...FIELD_HELPER, `for _n, _v in json.loads(${JSON.stringify(JSON.stringify(fields))}):`, "    cdo.set_editor_property(_n, _abfc_val(_v))", `print("ABFC_FIELDS ${fields.length}")`);
+    lines.push(...FIELD_HELPER, `for _n, _v in json.loads(${JSON.stringify(JSON.stringify(fields))}):`, "    _abfc_set(cdo, _n, _abfc_val(_v))", `print("ABFC_FIELDS ${fields.length}")`);
   }
   if (classManagerRow !== undefined) {
     const pkg = classPath.slice(0, classPath.indexOf("."));
