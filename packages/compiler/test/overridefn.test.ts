@@ -220,3 +220,13 @@ export class BP_Gun extends BP_FakeGun_C {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("@bpAccess on a function-graph override states the parent function's access specifier", () => {
+  const { ir, diagnostics } = build(SOURCE.replace("  @override\n  override CanFire", "  /** @bpAccess protected */\n  @override\n  override CanFire"));
+  assert.deepEqual(diagnostics, []);
+  const units = ir!.assets[0]!.units;
+  assert.equal(units.find((u) => u.name === "CanFire")!.signature.access, "protected");
+  assert.equal(units.find((u) => u.name === "Pick")!.signature.access, "public");
+  const bad = build(SOURCE.replace("  @override\n  override CanFire", "  /** @bpAccess friend */\n  @override\n  override CanFire"));
+  assert.ok(bad.diagnostics.some((d) => /@bpAccess/.test(d.message)));
+});

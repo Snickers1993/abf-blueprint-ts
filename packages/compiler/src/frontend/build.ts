@@ -1192,13 +1192,21 @@ class HirBuilder {
         return undefined;
       }
       const lone = fi.outs.length === 1 && fi.outs[0]!.pin === FUNCTION_RETURN_PIN;
+      // The override's entry must carry the parent function's access specifier. The backend reads it from the parent; a
+      // `@bpAccess protected` (or private) doc tag on the method states it when that fails ("Access specifier is not compatible").
+      const msym = this.checker.getSymbolAtLocation(m.name);
+      const accTag = msym ? bpTagsOfSymbol(msym).get("bpAccess")?.[0]?.trim() : undefined;
+      if (accTag !== undefined && accTag !== "public" && accTag !== "protected" && accTag !== "private") {
+        this.sink.error("ABFC2099", `@bpAccess of ${name} must be public, protected or private`, m.name);
+        return undefined;
+      }
       return {
         node: m,
         kind: "function",
         params: fparams,
         paramSyms,
         overrideOf: fi.owner,
-        access: "public",
+        access: accTag ?? "public",
         ...(lone ? { returnType: fi.outs[0]!.type } : { outs: fi.outs, pinOfTs: fi.pinOfTs }),
       };
     }

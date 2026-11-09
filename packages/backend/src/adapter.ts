@@ -45,7 +45,7 @@ export interface BpApplyAssetSpec {
   /** Function graphs to delete (TS wins: hand-made functions of a non-hybrid class). */
   remove_functions?: string[];
   /** Backend bp_apply feature `function_graphs`: own function graphs to create (signature only; the body comes in `graphs`). A name also in `remove_functions` is replaced. */
-  functions?: Array<{ name: string; inputs: IrParam[]; outputs: IrParam[]; access?: "public" | "protected" | "private"; /** Overrides the parent function of this name: the generated class path of the class that declares it (backend feature `override_functions`). */ override?: string }>;
+  functions?: Array<{ name: string; inputs: IrParam[]; outputs: IrParam[]; access?: "public" | "protected" | "private"; /** Overrides the parent function of this name: the generated class path of the class that declares it (backend feature `override_functions`). */ override?: string; /** The parent function's access specifier when the source states it (`@bpAccess`); else the backend reads it from the parent. */ override_access?: "protected" | "private" }>;
   /**
    * Blueprint interfaces the class implements (`class`: generated class path), with the signatures of the interface functions that
    * have outputs and are implemented (their bodies come in `graphs`). Backend bp_apply feature `interfaces` (abfc patch): an
@@ -240,7 +240,7 @@ export function renderMainSpec(a: AssetPlan, caps: BackendCapabilities, profile:
   // an interface function graph belongs to the interface entry (ImplementedInterfaces), not to FunctionGraphs
   const ifaceSet = new Set(a.interfaces ?? []);
   const ownFns = (a.functions ?? []).filter((f) => f.override === undefined || !ifaceSet.has(f.override));
-  if (ownFns.length > 0) spec.functions = ownFns.map((f) => ({ name: f.name, inputs: f.inputs, outputs: f.outputs, access: f.access, ...(f.override !== undefined ? { override: f.override } : {}) }));
+  if (ownFns.length > 0) spec.functions = ownFns.map((f) => ({ name: f.name, inputs: f.inputs, outputs: f.outputs, access: f.access, ...(f.override !== undefined ? { override: f.override, ...(f.access !== "public" ? { override_access: f.access } : {}) } : {}) }));
   if (ifaceSet.size > 0) {
     spec.interfaces = [...ifaceSet].map((cls) => ({
       class: cls,
