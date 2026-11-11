@@ -12,7 +12,8 @@ export const FUNCTION_RETURN_PIN = "ReturnValue";
 export type ParentFamily = "actor" | "component" | "widget" | "object";
 
 /** An own member variable (`Name!: T;` or `Name: T = <literal>` in the TS class); abfc declares it in the asset. `default` is Unreal default-value text. */
-export interface HirField { name: string; type: BpType; default?: string; span: Span }
+/** `component`: the field is a component (`Name = component(Class, props, { attachTo })`), not a member variable; `props` are field-default JSON values by property name. */
+export interface HirField { name: string; type: BpType; default?: string; span: Span; component?: { class: string; props: Record<string, unknown>; attachTo?: string } }
 
 export interface HirClass {
   name: string;
@@ -42,6 +43,8 @@ export interface HirClass {
   director?: { row: string; asset: string; /** The gameplay tag the row holds (`@director("Row", tag)`). */ tag?: string };
   /** `widget`: the asset is a Widget Blueprint (`@blueprint({ kind: "widget" })`). */
   kind?: "widget";
+  /** `@blueprint({ interfaces: [...] })`: class paths of the Blueprint interfaces the asset implements. */
+  interfaces?: string[];
 }
 
 export interface HirEvent {
@@ -119,6 +122,8 @@ export type HirExpr = (
       outs: Array<{ pin: string; type: BpType }>;
       /** `super.X(...)` in the override X: a Call Parent Function node (owner = the parent class). */
       parentCall?: true;
+      /** `message(obj, I_X_C).Fn(...)`: an interface Message node (K2Node_Message); `target` is the object messaged. */
+      message?: true;
     }
   | { k: "cast"; value: HirExpr; target: string; castPin: string }
   | { k: "optional"; value: HirExpr; then: HirExpr } // a?.b : `then` refers to value via { k: "hole" }
@@ -145,7 +150,7 @@ export type HirExpr = (
   /** `getWorldSubsystem(Class)`: a pure Get Subsystem node of the native world subsystem `cls`. */
   | { k: "subsystem"; cls: string }
   /** `transform`: the SpawnTransform (absent: identity). */
-  | { k: "spawn"; cls: string; owner?: HirExpr; transform?: HirExpr; collision?: string; scale?: string }
+  | { k: "spawn"; cls: string; owner?: HirExpr; instigator?: HirExpr; transform?: HirExpr; collision?: string; scale?: string }
   | { k: "arith"; op: "+" | "-" | "*" | "/"; kind: "int" | "real"; a: HirExpr; b: HirExpr }
   | { k: "cmp"; op: "<" | "<=" | ">" | ">="; kind: "int" | "real"; a: HirExpr; b: HirExpr }
   | { k: "index"; array: HirExpr; index: HirExpr; elem: BpType }

@@ -12,7 +12,7 @@ const here = fileURLToPath(new URL("./", import.meta.url));
 const phase2Dir = fileURLToPath(new URL("../../test/fixtures/phase2", import.meta.url));
 const profile = JSON.parse(readFileSync(fileURLToPath(new URL("../../../env/profiles/ue5.4.4-1050002.json", import.meta.url)), "utf8")) as Profile;
 
-// A parent with overridable functions that return values, as Abiotic_Weapon_ParentBP_C:Local_FirePressed.
+// A parent with overridable functions that return values, like a game weapon parent's fire handler.
 const STUB = `import type { int } from "@abfc/runtime";
 import { Actor } from "/Script/FakeEngine";
 /**
@@ -125,4 +125,108 @@ test("a parent function whose only output is ReturnValue is overridden with a pl
 test("an outputs override returns an object literal (TypeScript checks its fields)", () => {
   const plain = build(SOURCE.replace("return { ConsumedByWeapon: true };", "return true as never;"));
   assert.ok(plain.diagnostics.some((d) => /returns its outputs as an object literal/.test(d.message)), JSON.stringify(plain.diagnostics));
+});
+
+// A Blueprint parent (a /Game class) whose overridable member has no outputs: in the editor it is a function, not an event.
+const GAME_STUB = `import { Actor } from "/Script/FakeEngine";
+/**
+ * @bpPath /Game/Fake/BP_FakeGun.BP_FakeGun_C
+ * @bpMeta /Script/Engine.BlueprintGeneratedClass
+ */
+export declare class BP_FakeGun_C extends Actor {
+  /**
+   * @bpPath /Game/Fake/BP_FakeGun.BP_FakeGun_C:StartFiring
+   */
+  StartFiring(): void;
+}
+`;
+
+test("an @override of a member a Blueprint class declares, without outputs, is a function graph too", () => {
+  const dir = mkdtempSync(join(here, "ovgame-"));
+  try {
+    cpSync(phase2Dir, dir, { recursive: true });
+    for (const f of ["Phase2Bad.ts", "Counter.ts", "Director.ts"]) rmSync(join(dir, "src", f));
+    writeFileSync(join(dir, ".abfc", "stubs", "test", "Game", "Fake", "BP_FakeGun.d.ts"), GAME_STUB, "utf8");
+    writeFileSync(join(dir, "src", "Gun.ts"), `import { blueprint, override } from "@abfc/runtime";
+import type { int } from "@abfc/runtime";
+import { BP_FakeGun_C } from "/Game/Fake/BP_FakeGun";
+@blueprint({ path: "/TestMod/Gun/BP_Gun" })
+export class BP_Gun extends BP_FakeGun_C {
+  Fired: int = 0;
+  @override
+  override StartFiring(): void {
+    this.Fired = this.Fired + 1;
+  }
+}
+`, "utf8");
+    const loaded = loadProgram(dir);
+    assert.deepEqual(loaded.diagnostics, []);
+    const hir = buildHir(loaded, { mod: "TestMod" }, profile);
+    assert.deepEqual(hir.diagnostics, []);
+    const ir = lower(hir, profile);
+    assert.deepEqual(validateIrModule(ir), []);
+    const u = ir.assets[0]!.units.find((x) => x.name === "StartFiring")!;
+    assert.equal(u.kind, "function");
+    assert.equal(u.signature.override, "/Game/Fake/BP_FakeGun.BP_FakeGun_C");
+    assert.deepEqual(u.signature.outputs, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("super.X() of a parent function with outputs gives its outputs (a value, or a result object read by name)", () => {
+  const src = SOURCE.replace("return this.Armed;\n  }", "return super.CanFire();\n  }")
+    .replace("return { Count: Index, Ok: this.Armed };", "return { Count: super.Pick(Index).Count, Ok: this.Armed };");
+  const { ir, diagnostics } = build(src);
+  assert.deepEqual(diagnostics, []);
+  const units = ir!.assets[0]!.units;
+  for (const [unit, pin] of [["CanFire", "ReturnValue"], ["Pick", "Count"]] as const) {
+    const u = units.find((x) => x.name === unit)!;
+    const parent = u.nodes.find((n) => n.t3d.class === "/Script/BlueprintGraph.K2Node_CallParentFunction");
+    assert.ok(parent, unit);
+    assert.ok(u.wires.some(([from]) => from === `${parent!.id}.${pin}`), JSON.stringify(u.wires));
+  }
+});
+
+test("a native event that a Blueprint stub lists again (ReceiveBeginPlay on a game class) stays an override event", () => {
+  const dir = mkdtempSync(join(here, "ovnative-"));
+  try {
+    cpSync(phase2Dir, dir, { recursive: true });
+    for (const f of ["Phase2Bad.ts", "Counter.ts", "Director.ts"]) rmSync(join(dir, "src", f));
+    writeFileSync(join(dir, ".abfc", "stubs", "test", "Game", "Fake", "BP_FakeGun.d.ts"), GAME_STUB.replace("  StartFiring(): void;", `  StartFiring(): void;
+  /**
+   * @bpPath /Game/Fake/BP_FakeGun.BP_FakeGun_C:ReceiveBeginPlay
+   */
+  ReceiveBeginPlay(): void;`), "utf8");
+    writeFileSync(join(dir, "src", "Gun.ts"), `import { blueprint, override } from "@abfc/runtime";
+import { BP_FakeGun_C } from "/Game/Fake/BP_FakeGun";
+@blueprint({ path: "/TestMod/Gun/BP_Gun" })
+export class BP_Gun extends BP_FakeGun_C {
+  Ready: boolean = false;
+  @override
+  override ReceiveBeginPlay(): void {
+    this.Ready = true;
+  }
+}
+`, "utf8");
+    const loaded = loadProgram(dir);
+    assert.deepEqual(loaded.diagnostics, []);
+    const hir = buildHir(loaded, { mod: "TestMod" }, profile);
+    assert.deepEqual(hir.diagnostics, []);
+    const u = lower(hir, profile).assets[0]!.units.find((x) => x.name === "ReceiveBeginPlay")!;
+    assert.equal(u.kind, "override");
+    assert.equal(u.graph, "EventGraph");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("@bpAccess on a function-graph override states the parent function's access specifier", () => {
+  const { ir, diagnostics } = build(SOURCE.replace("  @override\n  override CanFire", "  /** @bpAccess protected */\n  @override\n  override CanFire"));
+  assert.deepEqual(diagnostics, []);
+  const units = ir!.assets[0]!.units;
+  assert.equal(units.find((u) => u.name === "CanFire")!.signature.access, "protected");
+  assert.equal(units.find((u) => u.name === "Pick")!.signature.access, "public");
+  const bad = build(SOURCE.replace("  @override\n  override CanFire", "  /** @bpAccess friend */\n  @override\n  override CanFire"));
+  assert.ok(bad.diagnostics.some((d) => /@bpAccess/.test(d.message)));
 });

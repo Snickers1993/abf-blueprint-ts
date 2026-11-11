@@ -6,3 +6,6 @@ build/
 *.tsbuildinfo
 .plans/
 .claude/
+
+# test runs under the Linux winpath shim leave Windows-style paths here
+\\*

@@ -393,3 +393,43 @@ test("a removed function graph has no graph entry; a recreated empty one has non
   assert.deepEqual(spec2.functions!.map((f) => f.name), ["noop"]);
   assert.deepEqual(spec2.graphs, []);
 });
+
+test("interfaces: an interface function graph goes to its interface entry, not to functions; components carry ensure and values", () => {
+  const IF = "/Game/Fake/I_Use.I_Use_C";
+  const a = fnAsset({
+    interfaces: [IF],
+    functions: [
+      { name: "CanUse", inputs: [], outputs: [{ name: "ReturnValue", type: "bool" }], access: "public", override: IF },
+      { name: "Own", inputs: [], outputs: [], access: "public" },
+    ],
+    components: [{ name: "Lid", class: "/Script/Engine.StaticMeshComponent", attachTo: "Mesh", props: { bHiddenInGame: { k: "bool", v: true } }, origin: unit.origin }],
+  });
+  const spec = renderMainSpec(a, caps(true, true), profile);
+  assert.deepEqual(spec.functions?.map((f) => f.name), ["Own"]);
+  assert.deepEqual(spec.interfaces, [{ class: IF, functions: [{ name: "CanUse", inputs: [], outputs: [{ name: "ReturnValue", type: "bool" }] }] }]);
+  assert.deepEqual(spec.components, [{ name: "Lid", class: "/Script/Engine.StaticMeshComponent", parent: "Mesh", ensure: true, values: { bHiddenInGame: { k: "bool", v: true } } }]);
+});
+
+test("applyPlan: an asset re-planned only for its structure (components, interfaces) still goes through the main pass", async () => {
+  const c = caps(true, true);
+  const base = planOf(ir).assets[0]!;
+  const structural = {
+    ...base,
+    units: [],
+    variables: [],
+    interfaces: ["/Game/Fake/I_Use.I_Use_C"],
+    components: [{ name: "Lid", class: "/Script/Engine.StaticMeshComponent", props: {}, origin: unit.origin }],
+    defaults: { classPath: `${base.asset}.X_C`, values: { "abfc:structure": "0123456789abcdef0123456789abcdef" }, hash: "h" },
+  };
+  const be = new FakeBackend(() => result({ assets: [{ asset: base.asset, node_ids: {} }] }));
+  await applyPlan(be, { mod: "TestMod", assets: [structural] }, c, profile, { cacheDir: "cache", record: () => {} });
+  assert.equal(be.calls[0]!.label, "main");
+  assert.equal(be.calls[0]!.specs[0]!.components.length, 1);
+  assert.equal(be.calls[0]!.specs[0]!.interfaces.length, 1);
+
+  // class defaults alone (no components, no interfaces) stay out of the main pass
+  const plain = { ...base, units: [], variables: [], defaults: { classPath: `${base.asset}.X_C`, values: {}, hash: "h" } };
+  const be2 = new FakeBackend(() => result({ assets: [{ asset: base.asset, node_ids: {} }] }));
+  await applyPlan(be2, { mod: "TestMod", assets: [plain] }, c, profile, { cacheDir: "cache", record: () => {} });
+  assert.ok(!be2.calls.some((x) => x.label === "main"));
+});

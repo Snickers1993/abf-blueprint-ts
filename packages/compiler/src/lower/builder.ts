@@ -525,6 +525,7 @@ export class UnitBuilder {
       }
       case "spawn": {
         const owner = e.owner ? this.optOperand(e.owner) : undefined;
+        const instigator = e.instigator ? this.optOperand(e.instigator) : undefined;
         const where = e.transform ? this.operand(e.transform) : undefined;
         const mk = where
           ? undefined
@@ -539,8 +540,9 @@ export class UnitBuilder {
         if (where) this.feed(where, id, "SpawnTransform", defaults);
         else this.link(`${mk}.${P.returnValue}`, `${id}.SpawnTransform`);
         if (owner) this.feed(owner, id, "Owner", defaults);
+        if (instigator) this.feed(instigator, id, "Instigator", defaults);
         this.settle(id, defaults);
-        return { pin: `${id}.${P.returnValue}`, nulls: [...(owner?.nulls ?? []), ...(where?.nulls ?? [])] };
+        return { pin: `${id}.${P.returnValue}`, nulls: [...(owner?.nulls ?? []), ...(instigator?.nulls ?? []), ...(where?.nulls ?? [])] };
       }
       case "arith":
       case "cmp": {
@@ -680,9 +682,9 @@ export class UnitBuilder {
     const sem: SemanticTag = e.owner === null
       ? { k: "call", function: e.name }
       : { k: "call", class: e.owner, function: e.name };
-    const nodeClass = e.parentCall ? "/Script/BlueprintGraph.K2Node_CallParentFunction" : this.profile.nodeClasses.callFunction;
-    // a parent call is a raw node (bp_apply has no kind for it): no semantic tag
-    const id = this.emit("call", nodeClass, props, e.parentCall ? undefined : sem, e.span);
+    const nodeClass = e.parentCall ? "/Script/BlueprintGraph.K2Node_CallParentFunction" : e.message ? "/Script/BlueprintGraph.K2Node_Message" : this.profile.nodeClasses.callFunction;
+    // a parent call or an interface message is a raw node (bp_apply has no kind for it): no semantic tag
+    const id = this.emit("call", nodeClass, props, e.parentCall || e.message ? undefined : sem, e.span);
     if (!e.pure) this.execInto(id);
     if (target) this.link(target.pin, `${id}.${P.self}`);
     for (const f of fed) this.feed(f.o, id, f.pin, defaults, objects);
