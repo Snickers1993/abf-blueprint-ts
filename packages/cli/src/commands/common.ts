@@ -2,7 +2,7 @@
 import { win32 } from "node:path";
 import { nodeKey } from "@abfc/backend";
 import type { Backend } from "@abfc/backend";
-import { buildHir, engineNormalisedFunction, listManifests, loadProgram, lowerChecked, readManifest, readSourceMap, sameClassPath, writeManifest, writeSourceMap } from "@abfc/compiler";
+import { buildHir, listManifests, loadProgram, lowerChecked, missingOnlyEngineRewritten, readManifest, readSourceMap, sameClassPath, writeManifest, writeSourceMap } from "@abfc/compiler";
 import type { CompilerProjectConfig, HirProgram, LoadedProgram, Manifest, ManifestUnit, SourceMapFile } from "@abfc/compiler";
 import { AbfcError } from "@abfc/env";
 import type { ProjectConfig } from "@abfc/env";
@@ -214,10 +214,11 @@ export function sourceMapOf(asset: IrAsset, names: Record<string, string>): Sour
 /**
  * The manifest units a re-synced stage still holds: every owned node is there, the unit is an adoption (a build replays it), or it is
  * a published function whose only missing nodes are the struct break/make nodes the editor rewrites on save (it stays tracked and the
- * build rebases it onto the stage graph, instead of being dropped and rebuilt as a hand-made function).
+ * build rebases it onto the stage graph when nothing else changed, or replaces it as an owned unit, instead of dropping it and
+ * treating the function as hand-made).
  */
 export function unitsHeldByStage<U extends ManifestUnit>(units: readonly U[], stage: Map<string, T3dNode>): U[] {
-  return units.filter((u) => u.adopt !== null || u.nodes.every((n) => stage.has(n)) || engineNormalisedFunction(u, stage) !== null);
+  return units.filter((u) => u.adopt !== null || u.nodes.every((n) => stage.has(n)) || missingOnlyEngineRewritten(u, stage));
 }
 
 /**

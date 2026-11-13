@@ -71,6 +71,17 @@ export function builtGraphMatches(unit: ManifestUnit, snapshot: Map<string, T3dN
 const ENGINE_REWRITTEN_NODE = /(^|\/)K2Node_(BreakStruct|MakeStruct)_\d+$/;
 const NEVER_OWNED_IN_FUNCTION = /(K2Node_FunctionEntry|K2Node_FunctionResult|EdGraphNode_Comment)$/;
 
+/**
+ * A function unit whose graph is still in the stage and whose only missing nodes are of the classes the editor rewrites on save.
+ * Says nothing about the rest of the graph: enough to keep the unit tracked across a re-sync (so the build either rebases it, when
+ * engineNormalisedFunction accepts it, or replaces it as an owned unit), not enough to call it unchanged.
+ */
+export function missingOnlyEngineRewritten(unit: ManifestUnit, snapshot: Map<string, T3dNode>): boolean {
+  if (!unit.id.startsWith("function:") || unit.assetHash === null || unit.nodes.length === 0) return false;
+  const missing = unit.nodes.filter((n) => !snapshot.has(n));
+  return missing.length > 0 && missing.length < unit.nodes.length && missing.every((n) => ENGINE_REWRITTEN_NODE.test(n));
+}
+
 /** A node the editor can leave in place of a struct break/make node: the same node class renamed, or a native Break... or Make... call. */
 function isRewriteReplacement(n: T3dNode): boolean {
   if (/K2Node_(BreakStruct|MakeStruct)$/.test(n.cls)) return true;
