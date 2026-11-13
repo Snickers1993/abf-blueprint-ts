@@ -14,7 +14,7 @@ export { lower, formatLiteral, assignPositions } from "./lower/index.js";
 export type { LowerOptions } from "./lower/index.js";
 export { analyzeAdoption, adoptionDiagnostics, AdoptionError } from "./ownership/adopt.js";
 export type { AdoptionAnalysis, AdoptOptions } from "./ownership/adopt.js";
-export { builtGraphMatches, driftDiagnostics, engineNormalisedFunction, fingerprintUnit, rebaseStaleUnits, unitState } from "./ownership/drift.js";
+export { builtGraphMatches, driftDiagnostics, engineNormalisedFunction, fingerprintUnit, missingOnlyEngineRewritten, rebaseStaleUnits, unitState } from "./ownership/drift.js";
 export type { StageInfo, UnitFingerprint, UnitState } from "./ownership/drift.js";
 export {
   assetFileStem,
