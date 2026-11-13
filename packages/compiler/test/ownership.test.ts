@@ -9,6 +9,7 @@ import {
   adoptionDiagnostics, analyzeAdoption, deleteManifest, deleteSourceMap, driftDiagnostics, fingerprintUnit, listManifests, mapCompileMessages, manifestPath, ownedSets,
   readManifest, readSourceMap, rebaseStaleUnits, unitState, writeManifest, writeSourceMap,
 } from "../src/index.js";
+import { builtGraphMatches, engineNormalisedFunction } from "../src/index.js";
 import type { Manifest, ManifestUnit, SourceMapFile } from "../src/index.js";
 
 const BP = "/Fake/Mod/BP_Host.BP_Host";
@@ -447,4 +448,50 @@ test("--remove-node: comment boxes and unlinked nodes only (ABFC5008)", () => {
   assert.deepEqual(a.owned, ["Call_9", "Cmt_A", "Ev_Scan", "Self_0"]);
   assert.throws(() => analyzeAdoption(nodes, "EventGraph", "Start", { extraNodes: ["Call_9"] }), /ABFC5008.*linked pins/);
   assert.throws(() => analyzeAdoption(nodes, "EventGraph", "Start", { extraNodes: ["Nope"] }), /ABFC5008.*no node named/);
+});
+
+test("a resync that only shows the editor's rewrite of struct break/make nodes keeps an owned function clean", () => {
+  // Function graph "Fn" as abfc applied it: entry -> call, a BreakStruct feeding the call. After a save and reload in the editor the
+  // BreakStruct comes back as a native break call under another name; nothing else in the graph changed.
+  const node = (graph: string, name: string, cls: string, pins: T3dNode["pins"]): [string, T3dNode] =>
+    [`${graph}/${name}`, { name, cls, graph, head: [], pins }];
+  const pin = (id: string, name: string, dir: "in" | "out", links: Array<{ node: string; pinId: string }> = []) =>
+    ({ id, name, dir, category: "real", subCategory: "double", subCategoryObject: null, container: null, defaultValue: null, defaultObject: null, links }) as unknown as T3dNode["pins"][number];
+  const built = new Map<string, T3dNode>([
+    node("Fn", "K2Node_FunctionEntry_9001", "/Script/BlueprintGraph.K2Node_FunctionEntry", []),
+    node("Fn", "K2Node_BreakStruct_9001", "/Script/BlueprintGraph.K2Node_BreakStruct", [pin("B1", "X", "out", [{ node: "K2Node_CallFunction_9001", pinId: "C1" }])]),
+    node("Fn", "K2Node_CallFunction_9001", "/Script/BlueprintGraph.K2Node_CallFunction", [pin("C1", "A", "in", [{ node: "K2Node_BreakStruct_9001", pinId: "B1" }])]),
+  ]);
+  const names = [...built.keys()].sort();
+  const fp = fingerprintUnit(built, names);
+  const unit: ManifestUnit = {
+    id: "function:Fn", graph: "Fn", irHash: "sha256:fn", assetHash: fp.assetHash, nodes: names, nodeIds: {}, tag: null,
+    stageSyncedAt: "2026-01-01T00:00:00", adopt: null, nodeHashes: fp.nodeHashes, links: fp.links,
+  };
+  const resaved = new Map<string, T3dNode>([
+    node("Fn", "K2Node_FunctionEntry_9001", "/Script/BlueprintGraph.K2Node_FunctionEntry", []),
+    node("Fn", "K2Node_CallFunction_0", "/Script/BlueprintGraph.K2Node_CallFunction", [pin("N1", "X", "out", [{ node: "K2Node_CallFunction_9001", pinId: "C1" }])]),
+    node("Fn", "K2Node_CallFunction_9001", "/Script/BlueprintGraph.K2Node_CallFunction", [pin("C1", "A", "in", [{ node: "K2Node_CallFunction_0", pinId: "N1" }])]),
+    node("Fn", "EdGraphNode_Comment_9001", "/Script/UnrealEd.EdGraphNode_Comment", []), // the build's tag comment: never a unit node
+  ]);
+  const expected = [...resaved.keys()].filter((k) => !k.includes("Comment")).sort();
+  const resynced = { syncedAt: "2026-02-02T00:00:00" };
+  assert.equal(unitState(unit, resaved, resynced), "staleStage");
+  assert.deepEqual(engineNormalisedFunction(unit, resaved), expected);
+  assert.equal(builtGraphMatches(unit, resaved), true);
+  // no ABFC5001/5002: the build leaves the function alone
+  assert.deepEqual(driftDiagnostics("/Fake/Mod/BP_Fn", [unit], resaved, resynced, new Map()), []);
+  const r = rebaseStaleUnits({ units: [unit] }, resaved, resynced);
+  assert.equal(r.changed, true);
+  assert.deepEqual(r.manifest.units[0]!.nodes, expected);
+  assert.equal(unitState(r.manifest.units[0]!, resaved, resynced), "clean");
+
+  // A missing node of any other class is real drift: no rebase, ABFC5002 stays.
+  const lostCall = new Map(resaved);
+  lostCall.delete("Fn/K2Node_CallFunction_9001");
+  assert.equal(engineNormalisedFunction(unit, lostCall), null);
+  assert.equal(builtGraphMatches(unit, lostCall), false);
+  assert.equal(driftDiagnostics("/Fake/Mod/BP_Fn", [unit], lostCall, resynced, new Map())[0]!.code, "ABFC5002");
+  // Only function units qualify (an event's nodes are not owned as a whole graph).
+  assert.equal(engineNormalisedFunction({ ...unit, id: "event:Fn" }, resaved), null);
 });

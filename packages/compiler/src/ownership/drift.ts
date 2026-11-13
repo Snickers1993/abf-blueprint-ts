@@ -59,17 +59,49 @@ export function unitState(unit: ManifestUnit, snapshot: Map<string, T3dNode>, st
  */
 export function builtGraphMatches(unit: ManifestUnit, snapshot: Map<string, T3dNode>): boolean {
   if (unit.assetHash === null || unit.nodes.length === 0) return false;
-  if (unit.nodes.some((n) => !snapshot.has(n))) return false;
+  if (unit.nodes.some((n) => !snapshot.has(n))) return engineNormalisedFunction(unit, snapshot) !== null;
   return unitStateHash(snapshot, unit.nodes) === unit.assetHash;
 }
 
-/** Same manifest units with `stageSyncedAt` moved to the current stage for the stale units whose built graph the stage still holds. */
+/**
+ * Node classes the editor itself rewrites when it saves and reloads a Blueprint: a struct break or make node on a struct with a
+ * native break/make function (Vector, Rotator, Transform...) comes back as a different node (or under a new name). Graphs abfc built
+ * hold these nodes; the published asset, read again after a `--resync`, does not.
+ */
+const ENGINE_REWRITTEN_NODE = /(^|\/)K2Node_(BreakStruct|MakeStruct)_\d+$/;
+const NEVER_OWNED_IN_FUNCTION = /(K2Node_FunctionEntry|K2Node_FunctionResult|EdGraphNode_Comment)$/;
+
+/**
+ * A function unit (owned whole: one function graph) whose stage graph differs from what abfc applied only in nodes the editor
+ * rewrites on save. Returns the keys of the graph's current nodes (the unit's new node list), or null when the unit is not such a
+ * case: not a function, nothing missing, a missing node of another class, or the function graph gone.
+ */
+export function engineNormalisedFunction(unit: ManifestUnit, snapshot: Map<string, T3dNode>): string[] | null {
+  if (!unit.id.startsWith("function:") || unit.assetHash === null || unit.nodes.length === 0) return null;
+  const missing = unit.nodes.filter((n) => !snapshot.has(n));
+  if (missing.length === 0 || !missing.every((n) => ENGINE_REWRITTEN_NODE.test(n))) return null;
+  // the owned nodes still there, plus the graph's other nodes except those a function unit never owns (entry, result, comments/tags)
+  const owned = new Set(unit.nodes);
+  const now = [...snapshot.entries()]
+    .filter(([k, n]) => n.graph === unit.graph && (owned.has(k) || !NEVER_OWNED_IN_FUNCTION.test(n.cls)))
+    .map(([k]) => k);
+  return now.some((k) => owned.has(k)) ? now.sort() : null;
+}
+
+/**
+ * Same manifest units with `stageSyncedAt` moved to the current stage for the stale units whose built graph the stage still holds.
+ * A function unit that differs only in nodes the editor rewrites on save (see engineNormalisedFunction) is rebased onto the stage's
+ * graph as well: its node list, hashes and links become those of the stage, so the build treats it as clean and leaves it alone.
+ */
 export function rebaseStaleUnits<T extends { units: ManifestUnit[] }>(manifest: T, snapshot: Map<string, T3dNode>, stage: StageInfo): { manifest: T; changed: boolean } {
   let changed = false;
   const units = manifest.units.map((u) => {
     if (unitState(u, snapshot, stage) !== "staleStage" || !builtGraphMatches(u, snapshot)) return u;
     changed = true;
-    return { ...u, stageSyncedAt: stage.syncedAt };
+    const now = engineNormalisedFunction(u, snapshot);
+    if (now === null) return { ...u, stageSyncedAt: stage.syncedAt };
+    const fp = fingerprintUnit(snapshot, now);
+    return { ...u, stageSyncedAt: stage.syncedAt, nodes: now, assetHash: fp.assetHash, nodeHashes: fp.nodeHashes, links: fp.links };
   });
   return { manifest: changed ? { ...manifest, units } : manifest, changed };
 }

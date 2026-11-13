@@ -2,12 +2,12 @@
 import { win32 } from "node:path";
 import { nodeKey } from "@abfc/backend";
 import type { Backend } from "@abfc/backend";
-import { buildHir, listManifests, loadProgram, lowerChecked, readManifest, readSourceMap, sameClassPath, writeManifest, writeSourceMap } from "@abfc/compiler";
-import type { CompilerProjectConfig, HirProgram, LoadedProgram, Manifest, SourceMapFile } from "@abfc/compiler";
+import { buildHir, engineNormalisedFunction, listManifests, loadProgram, lowerChecked, readManifest, readSourceMap, sameClassPath, writeManifest, writeSourceMap } from "@abfc/compiler";
+import type { CompilerProjectConfig, HirProgram, LoadedProgram, Manifest, ManifestUnit, SourceMapFile } from "@abfc/compiler";
 import { AbfcError } from "@abfc/env";
 import type { ProjectConfig } from "@abfc/env";
 import { parseExport } from "@abfc/ir";
-import type { BackendInfo, Diagnostic, IrAsset, IrModule, T3dExport } from "@abfc/ir";
+import type { BackendInfo, Diagnostic, IrAsset, IrModule, T3dExport, T3dNode } from "@abfc/ir";
 import { checkLock, readLock } from "@abfc/stubgen";
 import type { BackendStartOptions, CliContext } from "../context.js";
 import { SLOW_BACKEND_HINT } from "../progress.js";
@@ -212,6 +212,15 @@ export function sourceMapOf(asset: IrAsset, names: Record<string, string>): Sour
 }
 
 /**
+ * The manifest units a re-synced stage still holds: every owned node is there, the unit is an adoption (a build replays it), or it is
+ * a published function whose only missing nodes are the struct break/make nodes the editor rewrites on save (it stays tracked and the
+ * build rebases it onto the stage graph, instead of being dropped and rebuilt as a hand-made function).
+ */
+export function unitsHeldByStage<U extends ManifestUnit>(units: readonly U[], stage: Map<string, T3dNode>): U[] {
+  return units.filter((u) => u.adopt !== null || u.nodes.every((n) => stage.has(n)) || engineNormalisedFunction(u, stage) !== null);
+}
+
+/**
  * After the stage was re-synced from the mod (`--resync`, the automatic re-sync after a failed compile, a stage created from
  * scratch): the stage holds only what the mod holds, so the unpublished work of every asset of the mod is gone. The manifests
  * (and source maps) are brought back in line: units whose nodes the stage does not hold are dropped (they were never published,
@@ -253,24 +262,24 @@ export async function pruneManifestsToStage(
         }
       }
       if (units.length > 0) {
-        let held: Set<string>;
+        let heldNodes: Map<string, T3dNode>;
         try {
           const parsed = (await readAsset(ctx, backend, asset)).parsed;
-          held = new Set(parsed.nodes.keys());
+          heldNodes = parsed.nodes;
           stageParent = parsed.parentClass;
         } catch {
           // A stage-only rename is gone after a re-sync: the published nodes are still in the asset under its old path.
           try {
             if (base.renamedFrom === undefined) throw new Error("no earlier path");
             const parsed = (await readAsset(ctx, backend, base.renamedFrom)).parsed;
-            held = new Set(parsed.nodes.keys());
+            heldNodes = parsed.nodes;
             stageParent = parsed.parentClass;
           } catch {
             // unreadable stage: do not treat it as empty (that would drop published units), keep this manifest as it is
             continue;
           }
         }
-        units = base.units.filter((u) => u.adopt !== null || u.nodes.every((n) => held.has(n)));
+        units = unitsHeldByStage(base.units, heldNodes);
       }
       const parentChanged = base.parent !== undefined && stageParent !== null && !sameClassPath(base.parent, stageParent);
       if (!applied.has(asset) && units.length === base.units.length && !parentChanged) continue;
