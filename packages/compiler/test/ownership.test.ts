@@ -550,4 +550,12 @@ test("the struct-rewrite allowance does not hide edits elsewhere in the function
   // wiring changed away from the rewrite (A no longer feeds B)
   const rewired = resaved((m) => { m.get("Fn/A")!.pins[1] = pin("A2", "Out", "out", []); m.get("Fn/B")!.pins[0] = pin("Bi", "In", "in", []); });
   assert.equal(engineNormalisedFunction(unit, rewired), null);
+  // The manifest shape seen in practice: node names from what was written, hashes and links from the
+  // read-back, where the editor had already swapped in the replacement.
+  const plain = resaved(() => {});
+  const readBack = fingerprintUnit(plain, [...plain.keys()].sort());
+  const recorded: ManifestUnit = { ...unit, nodeHashes: readBack.nodeHashes, links: readBack.links };
+  assert.notEqual(engineNormalisedFunction(recorded, plain), null, "links that already name the replacement are accepted");
+  assert.equal(engineNormalisedFunction(recorded, changedDefault), null);
+  assert.equal(engineNormalisedFunction(recorded, rewired), null);
 });

@@ -123,9 +123,10 @@ export function engineNormalisedFunction(unit: ManifestUnit, snapshot: Map<strin
     for (const k of survivors) {
       if (fp.nodeHashes[k] === unit.nodeHashes[k]) continue;
       // a changed survivor is acceptable only as a neighbour of a rewritten node
-      if (!unit.links.some((l) => linkMentions(l, gone) && linkMentions(l, new Set([k])))) return null;
+      if (!unit.links.some((l) => (linkMentions(l, gone) || linkMentions(l, fresh)) && linkMentions(l, new Set([k])))) return null;
     }
-    const was = unit.links.filter((l) => !linkMentions(l, gone)).sort();
+    // The recorded links can already name the replacement nodes (the editor rewrites on compile, before the read-back), so drop those too.
+    const was = unit.links.filter((l) => !linkMentions(l, gone) && !linkMentions(l, fresh)).sort();
     const is = fp.links.filter((l) => !linkMentions(l, fresh)).sort();
     if (was.length !== is.length || was.some((l, i) => l !== is[i])) return null;
   }
