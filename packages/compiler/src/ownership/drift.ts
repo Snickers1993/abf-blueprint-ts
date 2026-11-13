@@ -71,10 +71,27 @@ export function builtGraphMatches(unit: ManifestUnit, snapshot: Map<string, T3dN
 const ENGINE_REWRITTEN_NODE = /(^|\/)K2Node_(BreakStruct|MakeStruct)_\d+$/;
 const NEVER_OWNED_IN_FUNCTION = /(K2Node_FunctionEntry|K2Node_FunctionResult|EdGraphNode_Comment)$/;
 
+/** A node the editor can leave in place of a struct break/make node: the same node class renamed, or a native Break... or Make... call. */
+function isRewriteReplacement(n: T3dNode): boolean {
+  if (/K2Node_(BreakStruct|MakeStruct)$/.test(n.cls)) return true;
+  return n.cls.endsWith("K2Node_CallFunction") && n.head.some((h) => /MemberName="(Break|Make)\w+"/.test(h));
+}
+
+function linkMentions(link: string, keys: Set<string>): boolean {
+  const [from = "", to = ""] = link.split(" > ");
+  for (const k of keys) if (from.startsWith(`${k}.`) || to.startsWith(`${k}.`)) return true;
+  return false;
+}
+
 /**
  * A function unit (owned whole: one function graph) whose stage graph differs from what abfc applied only in nodes the editor
  * rewrites on save. Returns the keys of the graph's current nodes (the unit's new node list), or null when the unit is not such a
  * case: not a function, nothing missing, a missing node of another class, or the function graph gone.
+ *
+ * Everything outside the rewrite must be what abfc applied, or the unit is real drift:
+ * - each missing node has exactly one replacement in the graph, and every new node is such a replacement;
+ * - a surviving node whose hash changed was linked to a rewritten node (its link target was renamed), no other node changed;
+ * - the links that do not touch a rewritten or replacement node are the recorded ones.
  */
 export function engineNormalisedFunction(unit: ManifestUnit, snapshot: Map<string, T3dNode>): string[] | null {
   if (!unit.id.startsWith("function:") || unit.assetHash === null || unit.nodes.length === 0) return null;
@@ -82,10 +99,26 @@ export function engineNormalisedFunction(unit: ManifestUnit, snapshot: Map<strin
   if (missing.length === 0 || !missing.every((n) => ENGINE_REWRITTEN_NODE.test(n))) return null;
   // the owned nodes still there, plus the graph's other nodes except those a function unit never owns (entry, result, comments/tags)
   const owned = new Set(unit.nodes);
-  const now = [...snapshot.entries()]
-    .filter(([k, n]) => n.graph === unit.graph && (owned.has(k) || !NEVER_OWNED_IN_FUNCTION.test(n.cls)))
-    .map(([k]) => k);
-  return now.some((k) => owned.has(k)) ? now.sort() : null;
+  const inGraph = [...snapshot.entries()].filter(([, n]) => n.graph === unit.graph);
+  const survivors = inGraph.filter(([k]) => owned.has(k)).map(([k]) => k);
+  const added = inGraph.filter(([k, n]) => !owned.has(k) && !NEVER_OWNED_IN_FUNCTION.test(n.cls));
+  if (survivors.length === 0) return null;
+  if (added.length !== missing.length || !added.every(([, n]) => isRewriteReplacement(n))) return null;
+  const now = [...survivors, ...added.map(([k]) => k)].sort();
+  if (unit.nodeHashes && unit.links) {
+    const gone = new Set(missing);
+    const fresh = new Set(added.map(([k]) => k));
+    const fp = fingerprintUnit(snapshot, now);
+    for (const k of survivors) {
+      if (fp.nodeHashes[k] === unit.nodeHashes[k]) continue;
+      // a changed survivor is acceptable only as a neighbour of a rewritten node
+      if (!unit.links.some((l) => linkMentions(l, gone) && linkMentions(l, new Set([k])))) return null;
+    }
+    const was = unit.links.filter((l) => !linkMentions(l, gone)).sort();
+    const is = fp.links.filter((l) => !linkMentions(l, fresh)).sort();
+    if (was.length !== is.length || was.some((l, i) => l !== is[i])) return null;
+  }
+  return now;
 }
 
 /**

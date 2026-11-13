@@ -453,8 +453,9 @@ test("--remove-node: comment boxes and unlinked nodes only (ABFC5008)", () => {
 test("a resync that only shows the editor's rewrite of struct break/make nodes keeps an owned function clean", () => {
   // Function graph "Fn" as abfc applied it: entry -> call, a BreakStruct feeding the call. After a save and reload in the editor the
   // BreakStruct comes back as a native break call under another name; nothing else in the graph changed.
-  const node = (graph: string, name: string, cls: string, pins: T3dNode["pins"]): [string, T3dNode] =>
-    [`${graph}/${name}`, { name, cls, graph, head: [], pins }];
+  const node = (graph: string, name: string, cls: string, pins: T3dNode["pins"], head: string[] = []): [string, T3dNode] =>
+    [`${graph}/${name}`, { name, cls, graph, head, pins }];
+  const breakVector = ['FunctionReference=(MemberParent="/Script/CoreUObject.Class\'/Script/Engine.KismetMathLibrary\'",MemberName="BreakVector")'];
   const pin = (id: string, name: string, dir: "in" | "out", links: Array<{ node: string; pinId: string }> = []) =>
     ({ id, name, dir, category: "real", subCategory: "double", subCategoryObject: null, container: null, defaultValue: null, defaultObject: null, links }) as unknown as T3dNode["pins"][number];
   const built = new Map<string, T3dNode>([
@@ -470,7 +471,7 @@ test("a resync that only shows the editor's rewrite of struct break/make nodes k
   };
   const resaved = new Map<string, T3dNode>([
     node("Fn", "K2Node_FunctionEntry_9001", "/Script/BlueprintGraph.K2Node_FunctionEntry", []),
-    node("Fn", "K2Node_CallFunction_0", "/Script/BlueprintGraph.K2Node_CallFunction", [pin("N1", "X", "out", [{ node: "K2Node_CallFunction_9001", pinId: "C1" }])]),
+    node("Fn", "K2Node_CallFunction_0", "/Script/BlueprintGraph.K2Node_CallFunction", [pin("N1", "X", "out", [{ node: "K2Node_CallFunction_9001", pinId: "C1" }])], breakVector),
     node("Fn", "K2Node_CallFunction_9001", "/Script/BlueprintGraph.K2Node_CallFunction", [pin("C1", "A", "in", [{ node: "K2Node_CallFunction_0", pinId: "N1" }])]),
     node("Fn", "EdGraphNode_Comment_9001", "/Script/UnrealEd.EdGraphNode_Comment", []), // the build's tag comment: never a unit node
   ]);
@@ -494,4 +495,59 @@ test("a resync that only shows the editor's rewrite of struct break/make nodes k
   assert.equal(driftDiagnostics("/Fake/Mod/BP_Fn", [unit], lostCall, resynced, new Map())[0]!.code, "ABFC5002");
   // Only function units qualify (an event's nodes are not owned as a whole graph).
   assert.equal(engineNormalisedFunction({ ...unit, id: "event:Fn" }, resaved), null);
+
+  // The break node deleted with no replacement: real drift.
+  const noReplacement = new Map(resaved);
+  noReplacement.delete("Fn/K2Node_CallFunction_0");
+  assert.equal(engineNormalisedFunction(unit, noReplacement), null);
+  assert.equal(builtGraphMatches(unit, noReplacement), false);
+  // The new node is not a break/make replacement (an ordinary call was added): real drift.
+  const otherCall = new Map(resaved);
+  otherCall.set("Fn/K2Node_CallFunction_0", { ...resaved.get("Fn/K2Node_CallFunction_0")!, head: ['FunctionReference=(MemberName="PrintString")'] });
+  assert.equal(engineNormalisedFunction(unit, otherCall), null);
+  // An extra hand-made node next to the rewrite: real drift.
+  const extra = new Map(resaved);
+  extra.set("Fn/K2Node_CallFunction_77", node("Fn", "K2Node_CallFunction_77", "/Script/BlueprintGraph.K2Node_CallFunction", [], breakVector)[1]);
+  assert.equal(engineNormalisedFunction(unit, extra), null);
+});
+
+test("the struct-rewrite allowance does not hide edits elsewhere in the function", () => {
+  const node = (name: string, cls: string, pins: T3dNode["pins"], head: string[] = []): [string, T3dNode] =>
+    [`Fn/${name}`, { name, cls, graph: "Fn", head, pins }];
+  const pin = (id: string, name: string, dir: "in" | "out", links: Array<{ node: string; pinId: string }> = [], defaultValue: string | null = null) =>
+    ({ id, name, dir, category: "real", subCategory: "double", subCategoryObject: null, container: null, defaultValue, defaultObject: null, links }) as unknown as T3dNode["pins"][number];
+  const call = "/Script/BlueprintGraph.K2Node_CallFunction";
+  const breakVector = ['FunctionReference=(MemberName="BreakVector")'];
+  // Break -> A -> B ; B is not linked to the break node.
+  const built = new Map<string, T3dNode>([
+    node("K2Node_BreakStruct_1", "/Script/BlueprintGraph.K2Node_BreakStruct", [pin("B1", "X", "out", [{ node: "A", pinId: "A1" }])]),
+    node("A", call, [pin("A1", "In", "in", [{ node: "K2Node_BreakStruct_1", pinId: "B1" }]), pin("A2", "Out", "out", [{ node: "B", pinId: "Bi" }])], ['FunctionReference=(MemberName="Abs")']),
+    node("B", call, [pin("Bi", "In", "in", [{ node: "A", pinId: "A2" }]), pin("Bd", "Scale", "in", [], "1.0")], ['FunctionReference=(MemberName="Sqrt")']),
+  ]);
+  const names = [...built.keys()].sort();
+  const fp = fingerprintUnit(built, names);
+  const unit: ManifestUnit = {
+    id: "function:Fn", graph: "Fn", irHash: "sha256:fn", assetHash: fp.assetHash, nodes: names, nodeIds: {}, tag: null,
+    stageSyncedAt: "2026-01-01T00:00:00", adopt: null, nodeHashes: fp.nodeHashes, links: fp.links,
+  };
+  const resaved = (edit: (m: Map<string, T3dNode>) => void): Map<string, T3dNode> => {
+    const m = new Map<string, T3dNode>([
+      node("K2Node_CallFunction_0", call, [pin("N1", "X", "out", [{ node: "A", pinId: "A1" }])], breakVector),
+      node("A", call, [pin("A1", "In", "in", [{ node: "K2Node_CallFunction_0", pinId: "N1" }]), pin("A2", "Out", "out", [{ node: "B", pinId: "Bi" }])], ['FunctionReference=(MemberName="Abs")']),
+      node("B", call, [pin("Bi", "In", "in", [{ node: "A", pinId: "A2" }]), pin("Bd", "Scale", "in", [], "1.0")], ['FunctionReference=(MemberName="Sqrt")']),
+    ]);
+    edit(m);
+    return m;
+  };
+  assert.notEqual(engineNormalisedFunction(unit, resaved(() => {})), null, "the plain rewrite is accepted");
+  // a default changed on a node away from the rewrite
+  const changedDefault = resaved((m) => { m.get("Fn/B")!.pins[1] = pin("Bd", "Scale", "in", [], "2.0"); });
+  assert.equal(engineNormalisedFunction(unit, changedDefault), null);
+  assert.equal(builtGraphMatches(unit, changedDefault), false);
+  // a function reference changed on a node away from the rewrite
+  const changedCall = resaved((m) => { m.get("Fn/B")!.head = ['FunctionReference=(MemberName="Square")']; });
+  assert.equal(engineNormalisedFunction(unit, changedCall), null);
+  // wiring changed away from the rewrite (A no longer feeds B)
+  const rewired = resaved((m) => { m.get("Fn/A")!.pins[1] = pin("A2", "Out", "out", []); m.get("Fn/B")!.pins[0] = pin("Bi", "In", "in", []); });
+  assert.equal(engineNormalisedFunction(unit, rewired), null);
 });
