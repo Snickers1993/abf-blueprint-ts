@@ -224,7 +224,10 @@ async function buildInner(ctx: CliContext, session: BackendSession, rec: Recorde
     ctx,
     fullRead || stage.stagingPath === ""
       ? null
-      : new ReadCache(paths.cacheDir, stage.stagingPath, mod, readCacheIdentity({ server: info.serverVersion, engine: info.engineVersion, ext: info.extensions, caps, profile: profile.id })),
+      : new ReadCache(paths.cacheDir, stage.stagingPath, mod, readCacheIdentity({ server: info.serverVersion, engine: info.engineVersion, ext: info.extensions, caps, profile: profile.id }), [
+          // reads made before the stub lock left the identity (same backend and editor): still valid, moved over on the first hit
+          readCacheIdentity({ server: info.serverVersion, engine: info.engineVersion, ext: info.extensions, caps, stubs: stubLockHashOf(readLock(win32.join(ctx.paths.stubsDir, profile.id))), profile: profile.id }),
+        ]),
   );
   // The assets the Mod Editor saved (their files caused the re-sync): their class defaults are applied again, TypeScript wins.
   const editedInMod = new Set<string>();

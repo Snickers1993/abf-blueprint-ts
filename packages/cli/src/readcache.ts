@@ -5,8 +5,11 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-/** Bump when what a cached read means changes (the key or the stored text). 2: value-only references are kept by presence. */
-export const READ_CACHE_VERSION = 2;
+/**
+ * Bump when what a cached read means changes (the key or the stored text). Entries with a value-only dependency kept as "present"
+ * are still version 1: an older abfc sees "present" as a changed hash and reads again, which is safe.
+ */
+export const READ_CACHE_VERSION = 1;
 /** Entries kept per asset: the current file and a few earlier ones (a failed compile puts the stage back to an earlier file). */
 const MAX_PER_ASSET = 4;
 
@@ -147,6 +150,8 @@ export class ReadCache {
     private readonly stagingPath: string,
     private readonly mod: string,
     private readonly identity: string,
+    /** Identities of earlier abfc versions whose reads are just as valid (the stub lock was part of it); a hit is stored again under `identity`. */
+    private readonly legacy: readonly string[] = [],
   ) {
     this.dir = join(cacheDir, "reads");
     this.indexFile = join(this.dir, "index.json");
@@ -202,7 +207,7 @@ export class ReadCache {
     const entries = this.index.assets[key.asset.toLowerCase()] ?? [];
     let miss: ReadMiss = { asset: key.asset, reason: entries.length === 0 ? "new" : "backend" };
     for (const e of entries) {
-      if (e.identity !== this.identity) continue;
+      if (e.identity !== this.identity && !this.legacy.includes(e.identity)) continue;
       if (e.files !== key.files) {
         if (miss.reason === "backend") miss = { asset: key.asset, reason: "files" };
         continue;
@@ -227,6 +232,7 @@ export class ReadCache {
         const text = readFileSync(file, "utf8");
         if (sha(text) !== e.text) throw new Error("changed");
         this.stats.hits++;
+        if (e.identity !== this.identity) this.put(key, text);
         return text;
       } catch {
         miss = { asset: key.asset, reason: "text" };

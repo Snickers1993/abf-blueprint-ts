@@ -141,3 +141,23 @@ test("misses say why: never read, own files changed", () => {
     r.done();
   }
 });
+
+test("a read stored under an earlier identity that is listed as legacy is served and stored again under the current one", () => {
+  const r = rig();
+  try {
+    r.write("Code/BP_A.uasset", "v1");
+    const old = readCacheIdentity({ server: "1", stubs: "lock-a" });
+    const c = new ReadCache(r.cacheDir, r.stage, "Mod", old);
+    c.put(c.key(A)!, exportOf("one"));
+    const now = new ReadCache(r.cacheDir, r.stage, "Mod", ID, [old]);
+    assert.equal(now.get(now.key(A)!), exportOf("one"));
+    // the next run needs no legacy identity any more
+    const next = new ReadCache(r.cacheDir, r.stage, "Mod", ID);
+    assert.equal(next.get(next.key(A)!), exportOf("one"));
+    // an identity that is not listed is still never used
+    const other = new ReadCache(r.cacheDir, r.stage, "Mod", readCacheIdentity({ server: "2" }), [readCacheIdentity({ server: "3" })]);
+    assert.equal(other.get(other.key(A)!), null);
+  } finally {
+    r.done();
+  }
+});
