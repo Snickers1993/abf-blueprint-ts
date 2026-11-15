@@ -1,7 +1,7 @@
 // CLI end-to-end on the step 23 fixture project (a synthetic mod, TestMod) against the in-memory fake backend.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join, win32 } from "node:path";
 import type { ReflectData, ReflectRequest } from "@abfc/backend";
 import { buildHir, compileTests, loadProgram, lower, readManifest, readRetired, readSourceMap, writeManifest } from "@abfc/compiler";
@@ -278,6 +278,38 @@ test("(b1p) a published unit that is changed and fails to compile keeps the entr
     assert.equal(x.code, 0, x.out);
     assert.doesNotMatch(x.out, /ABFC500[23]/);
     assert.match(x.out, /applied UpdateTarget/);
+  });
+});
+
+test("(b1v) an unpublished build, then a re-sync from the mod: the published event stays abfc's and is replaced, never kept as hand-made", async () => {
+  await withRig({ handMadeEvent: false }, async (r) => {
+    let x = await r.run(["build"]);
+    assert.equal(x.code, 0, x.out);
+    x = await r.run(["publish"]);
+    assert.equal(x.code, 0, x.out);
+    r.backend.markPublished();
+    const publishedNodes = readManifest(r.dir, RELAY_ASSET)!.units[0]!.nodes;
+    assert.ok(existsSync(join(r.dir, ".abfc", "published")), "the publish kept a copy of the manifests");
+
+    // a changed unit is built (new node names) but not published
+    const src = join(r.dir, "src", "Relay.ts");
+    writeFileSync(src, readFileSync(src, "utf8").replace("const rowName = Lib.RowToName(pot.Row);", "const rowName = Lib.RowToName(pot.Row); this.LastName = rowName;"), "utf8");
+    x = await r.run(["build"]);
+    assert.equal(x.code, 0, x.out);
+    assert.notDeepEqual(readManifest(r.dir, RELAY_ASSET)!.units[0]!.nodes, publishedNodes);
+
+    // the stage is copied from the mod again (a script saved other assets, a publish failed): it holds the published nodes
+    x = await r.run(["build", "--resync"]);
+    assert.equal(x.code, 0, x.out);
+    assert.doesNotMatch(x.out, /ABFC500[23]|hand-made/);
+    assert.match(x.out, /applied UpdateTarget/);
+    const held = r.backend.nodeNames(RELAY_ASSET);
+    const unit = readManifest(r.dir, RELAY_ASSET)!.units;
+    assert.equal(unit.length, 1);
+    assert.ok(unit[0]!.nodes.every((n) => held.includes(n)));
+    assert.ok(publishedNodes.every((n) => !held.includes(n) || unit[0]!.nodes.includes(n)), "the published nodes were replaced, not kept beside the new ones");
+    x = await r.run(["build"]);
+    assert.match(x.out, /up to date/);
   });
 });
 

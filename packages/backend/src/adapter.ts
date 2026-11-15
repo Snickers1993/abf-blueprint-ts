@@ -1,6 +1,6 @@
 // IR -> bp_apply adapter (design 7.3): renders an ApplyPlan into bp_apply specs and runs it against a Backend.
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { AbfcError } from "@abfc/env";
 import { parseBpType } from "@abfc/ir";
 import type { ApplyPlan, AssetPlan, BackendCapabilities, Diagnostic, EventMeta, IrNode, IrParam, IrUnit, Profile } from "@abfc/ir";
@@ -323,10 +323,12 @@ function entryFor(r: BpApplyResult, asset: string, i: number): NonNullable<BpApp
   return r.assets?.find((x) => x.asset === asset) ?? r.assets?.[i];
 }
 
-function readFinal(run: string, i: number): string | null {
+/** The export the backend wrote after a pass: `final_<i>.t3d` of the run, else the file its result names for the asset (`final`). */
+function readFinal(run: string, i: number, named?: string): string | null {
   if (run === "") return null;
-  const file = join(run, `final_${i}.t3d`);
-  return existsSync(file) ? readFileSync(file, "utf8") : null;
+  const files = [join(run, `final_${i}.t3d`), ...(named !== undefined && named !== "" ? [isAbsolute(named) ? named : join(run, named)] : [])];
+  for (const file of files) if (existsSync(file)) return readFileSync(file, "utf8");
+  return null;
 }
 
 function patchRefs(a: AssetPlan, spec: BpApplyAssetSpec, caps: BackendCapabilities, profile: Profile): WildcardPatchRef[] {
@@ -510,7 +512,7 @@ export async function applyPlan(
     return {
       asset: a.asset,
       nodeIds,
-      finalText: ok ? readFinal(last.run, i) : null,
+      finalText: ok ? readFinal(last.run, i, entryFor(last, a.asset, i)?.final) : null,
       compile: errors.filter((e) => e.asset === null || e.asset === a.asset),
       tagName: null,
       tagNames: {},
@@ -549,7 +551,7 @@ export async function applyPlan(
         if (real !== undefined) out.tagNames[u.unit.id] = real;
       }
       out.tagName = Object.values(out.tagNames)[0] ?? null;
-      out.finalText = readFinal(tag.run, ti) ?? out.finalText;
+      out.finalText = readFinal(tag.run, ti, entry?.final) ?? out.finalText;
     });
   }
   const added = await applyDefaultsPass(backend, plan, perAsset, caps, o);

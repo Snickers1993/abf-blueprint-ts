@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ReadCache, readCacheIdentity, referencedPackages } from "../src/readcache.js";
+import { ReadCache, classifyReferences, readCacheIdentity, referencedPackages } from "../src/readcache.js";
 
 function rig(): { stage: string; cacheDir: string; write(rel: string, text: string): void; done(): void } {
   const root = mkdtempSync(join(tmpdir(), "abfc-readcache-"));
@@ -84,6 +84,59 @@ test("another backend or stub identity never uses the read; an asset with no fil
     const other = new ReadCache(r.cacheDir, r.stage, "Mod", readCacheIdentity({ server: "2" }));
     assert.equal(other.get(other.key(A)!), null);
     assert.equal(c.key("/Mod/Code/BP_Missing"), null);
+  } finally {
+    r.done();
+  }
+});
+
+test("a package named only as a default value is kept by presence: re-saving it keeps the read, deleting it does not", () => {
+  const r = rig();
+  try {
+    r.write("Code/BP_A.uasset", "v1");
+    r.write("Rooms/BP_Section.uasset", "s1");
+    r.write("Code/BP_B.uasset", "b1");
+    const pin = (cls: string): string =>
+      `CustomProperties Pin (PinId=1,PinName="Class",PinType.PinCategory="class",PinType.PinSubCategoryObject=/Script/CoreUObject.Class'/Script/Engine.Actor',DefaultObject="/Mod/Rooms/${cls}.${cls}_C",)`;
+    const text = exportOf(`${pin("BP_Section")}\nFunctionReference=(MemberParent="/Script/Engine.BlueprintGeneratedClass'/Mod/Code/BP_B.BP_B_C'",MemberName="Go")`);
+    const kinds = classifyReferences(text, "Mod", A);
+    assert.deepEqual([...kinds], [["/Mod/Code/BP_B", "structure"], ["/Mod/Rooms/BP_Section", "value"]]);
+    const c = new ReadCache(r.cacheDir, r.stage, "Mod", ID);
+    c.put(c.key(A)!, text);
+    // a room bake saves the section again: the read stands
+    r.write("Rooms/BP_Section.uasset", "s2-rebaked");
+    const c2 = new ReadCache(r.cacheDir, r.stage, "Mod", ID);
+    assert.equal(c2.get(c2.key(A)!), text);
+    // a change to a class whose member the export calls still re-reads, and says why
+    r.write("Code/BP_B.uasset", "b2");
+    const c3 = new ReadCache(r.cacheDir, r.stage, "Mod", ID);
+    assert.equal(c3.get(c3.key(A)!), null);
+    assert.deepEqual(c3.missed, [{ asset: A, reason: "dep", dep: "/Mod/Code/BP_B" }]);
+    r.write("Code/BP_B.uasset", "b1");
+    // the section deleted: the read is not used
+    rmSync(join(r.stage, "Content", "Rooms", "BP_Section.uasset"));
+    const c4 = new ReadCache(r.cacheDir, r.stage, "Mod", ID);
+    assert.equal(c4.get(c4.key(A)!), null);
+    assert.equal(c4.missed[0]?.reason, "dep");
+  } finally {
+    r.done();
+  }
+});
+
+test("a mention that is both a default and a type counts as structure", () => {
+  const text = `DefaultObject="/Mod/X/BP_S.BP_S_C"\nVarType=(PinCategory="object",PinSubCategoryObject="/Script/Engine.BlueprintGeneratedClass'/Mod/X/BP_S.BP_S_C'")`;
+  assert.deepEqual([...classifyReferences(text, "Mod", A)], [["/Mod/X/BP_S", "structure"]]);
+});
+
+test("misses say why: never read, own files changed", () => {
+  const r = rig();
+  try {
+    r.write("Code/BP_A.uasset", "v1");
+    const c = new ReadCache(r.cacheDir, r.stage, "Mod", ID);
+    assert.equal(c.get(c.key(A)!), null);
+    c.put(c.key(A)!, exportOf("one"));
+    r.write("Code/BP_A.uasset", "v2");
+    assert.equal(c.get(c.key(A)!), null);
+    assert.deepEqual(c.missed.map((m) => m.reason), ["new", "files"]);
   } finally {
     r.done();
   }

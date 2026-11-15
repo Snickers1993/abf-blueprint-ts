@@ -2,7 +2,7 @@
 import { win32 } from "node:path";
 import { nodeKey } from "@abfc/backend";
 import type { Backend } from "@abfc/backend";
-import { buildHir, listManifests, loadProgram, lowerChecked, missingOnlyEngineRewritten, readManifest, readSourceMap, sameClassPath, writeManifest, writeSourceMap } from "@abfc/compiler";
+import { buildHir, listManifests, loadProgram, lowerChecked, missingOnlyEngineRewritten, readManifest, readPublishedManifest, readSourceMap, sameClassPath, writeManifest, writeSourceMap } from "@abfc/compiler";
 import type { CompilerProjectConfig, HirProgram, LoadedProgram, Manifest, ManifestUnit, SourceMapFile } from "@abfc/compiler";
 import { AbfcError } from "@abfc/env";
 import type { ProjectConfig } from "@abfc/env";
@@ -279,15 +279,18 @@ export async function pruneManifestsToStage(
       const base = o.base?.get(asset) ?? current;
       if (base === null || base.structFieldsHash !== undefined) continue;
       let units = base.units;
+      // What the last successful publish recorded: the re-synced stage holds those nodes unless the editor changed them since.
+      const publishedUnits = readPublishedManifest(projectDir, asset)?.units ?? [];
+      let fromPublish = 0;
       let stageParent: string | null = null; // the parent the stage holds now (a reparent or recreate of an unpublished stage is gone with the re-sync)
-      if (units.length === 0 && base.parent !== undefined) {
+      if (units.length === 0 && publishedUnits.length === 0 && base.parent !== undefined) {
         try {
           stageParent = (await readAsset(ctx, backend, asset)).parsed.parentClass;
         } catch {
           // unreadable: the recorded parent stays
         }
       }
-      if (units.length > 0) {
+      if (units.length > 0 || publishedUnits.length > 0) {
         let heldNodes: Map<string, T3dNode>;
         try {
           const parsed = (await readAsset(ctx, backend, asset)).parsed;
@@ -306,9 +309,24 @@ export async function pruneManifestsToStage(
           }
         }
         units = unitsHeldByStage(base.units, heldNodes);
+        // A unit whose current entry names nodes the stage lost, or that the manifest no longer lists, but whose published entry the
+        // stage holds node for node: abfc published those nodes, so they stay abfc's (the next build replaces them if the TS changed).
+        // Without this, an unpublished build followed by a re-sync (the mod saved in between, a failed publish) left the published
+        // event in the stage as "hand-made" and the build added a second one of the same name.
+        const kept = new Set(units.map((u) => u.id));
+        for (const pu of publishedUnits) {
+          if (kept.has(pu.id) || pu.nodes.length === 0 || !pu.nodes.every((n) => heldNodes.has(n))) continue;
+          units = [...units, pu];
+          kept.add(pu.id);
+          fromPublish++;
+        }
+        if (fromPublish > 0) {
+          const order = new Map(base.units.map((u, i) => [u.id, i]));
+          units = [...units].sort((a, b) => (order.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (order.get(b.id) ?? Number.MAX_SAFE_INTEGER));
+        }
       }
       const parentChanged = base.parent !== undefined && stageParent !== null && !sameClassPath(base.parent, stageParent);
-      if (!applied.has(asset) && units.length === base.units.length && !parentChanged) continue;
+      if (!applied.has(asset) && units.length === base.units.length && fromPublish === 0 && !parentChanged) continue;
       // The family recorded with the old parent no longer says anything about the parent the stage holds: dropped (the next build asks the backend).
       const { parentFamily: _family, ...rest } = base;
       const restored: Manifest = parentChanged ? { ...rest, units, parent: stageParent! } : { ...base, units };

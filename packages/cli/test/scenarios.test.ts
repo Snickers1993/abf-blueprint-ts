@@ -650,6 +650,31 @@ test("(S12c) class defaults of an asset saved in the Mod Editor are applied agai
   });
 });
 
+test("(S12e) an asset that only gets its class defaults again is not read back from the editor after the apply", async () => {
+  await withRig({ ...OPS }, async (r) => {
+    const withTick = (cls: string): string => tally(cls).replace("@blueprint()", "@blueprint({ tickInterval: 0.5 })");
+    tallyOnly(r.dir, withTick("BP_Zed"));
+    writeFileSync(join(r.dir, "src", "Other.ts"), withTick("BP_Other"), "utf8");
+    let x = await r.run(["build"]);
+    assert.equal(x.code, 0, x.out);
+    x = await r.run(["publish"]);
+    assert.equal(x.code, 0, x.out);
+    r.backend.markPublished();
+
+    // --resync re-applies every asset's class defaults (TypeScript wins); no unit changed, so nothing is read after the apply
+    const from = r.backend.calls.length;
+    x = await r.run(["build", "--resync"]);
+    assert.equal(x.code, 0, x.out);
+    const calls = r.backend.calls.slice(from);
+    const lastApply = calls.map((c) => c.tool).lastIndexOf("bp_apply");
+    assert.ok(lastApply >= 0, "the defaults pass ran");
+    assert.deepEqual(defaultsAssets({ backend: { calls } }).sort(), ["/TestMod/BP_Other", "/TestMod/BP_Zed"]);
+    assert.equal(calls.slice(lastApply).filter((c) => c.tool === "bp_read").length, 0, "no read back of a defaults-only asset");
+    const rec = readFileSync(join(r.dir, ".abfc", "runs.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l) as { step: string; units?: number });
+    assert.equal(rec.filter((e) => e.step === "build.record").at(-1)?.units, 0);
+  });
+});
+
 test("(S24b) a struct whose TypeScript is gone warns once (ABFC5018) and stays", async () => {
   await withRig({ ...OPS, structs: true }, async (r) => {
     tallyOnly(r.dir, tally("BP_Zed"));
