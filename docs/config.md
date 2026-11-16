@@ -20,6 +20,7 @@ Schema 2. A JSON schema ships with the VS Code extension, so the editor complete
 | `stubs.classes` | string array, `[]` | Optional extras. Every `/Game` class and every engine name your source imports gets stubs automatically; list a path here only to force it (for example a class no source imports yet). |
 | `stubs.scriptClasses` | string array, `[]` | Optional extras: `/Script/Module.Class` paths to generate stubs for. The profile's default engine classes are always generated; `abfc init` writes an empty list. |
 | `stubs.modAssets` | `"all"` or a list | `"all"` stubs every Blueprint of the mod. A list holds mod-relative paths such as `"Relays/BP_Example"`. A leading `/` is [ABFC1021](errors.md#abfc1021). |
+| `stubs.classOnly` | list | Mod-relative Blueprints stubbed as their class and parent only, without own members. Each is read once and then kept when its files change, so a room bake that re-saves it costs `abfc generate` nothing. Use it for Blueprints the TypeScript only spawns or names, or uses only through inherited members. An entry need not also be in `modAssets`. `generate --full` reads them again. |
 | `stubs.widgetMembers` | object | Deprecated. Members are found by `abfc generate`; entries that reflection finds warn [ABFC3015](errors.md#abfc3015), others are still emitted (class path, then member name, then widget class path). |
 | `stubs.scriptModules` | ignored | Deprecated; use `stubs.scriptClasses` ([ABFC3010](errors.md#abfc3010)). |
 | `backend.kind` | `"bp_apply"` | The only supported backend. |

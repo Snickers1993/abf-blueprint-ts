@@ -22,6 +22,12 @@ export interface ProjectConfig {
     classes: string[];
     scriptClasses: string[];
     modAssets: "all" | string[];
+    /**
+     * Mod assets (full paths after loading, like `modAssets`) whose stub is only the class and its parent: no own members. Read once,
+     * then kept when their files change (a room bake re-saves them), so they cost `abfc generate` nothing. For Blueprints the
+     * TypeScript only spawns or names, or uses through inherited members. Each is also stubbed when `modAssets` does not list it.
+     */
+    classOnly?: string[];
     scriptModules?: string[];
     /**
      * Designer widgets of Widget Blueprints that cannot be read from an export (those under /Game): class path ->
@@ -180,12 +186,23 @@ function parseConfig(file: string, raw: unknown, partial: boolean): Partial<Proj
         return modName === undefined ? entry : joinModPath(modName, entry);
       });
     }
+    let classOnly = strArray(file, s, "classOnly", "stubs.");
+    if (classOnly !== undefined && schemaVersion >= 2) {
+      const modName = out.mod?.name;
+      classOnly = classOnly.map((entry, i) => {
+        if (entry.startsWith("/")) fail(file, `stubs.classOnly[${i}]`, 'write mod-relative paths such as "Rooms/BP_Section"');
+        const problem = modRelativeProblem(entry);
+        if (problem !== null) fail(file, `stubs.classOnly[${i}]`, problem);
+        return modName === undefined ? entry : joinModPath(modName, entry);
+      });
+    }
     const stubs: ProjectConfig["stubs"] = {
       classes: strArray(file, s, "classes", "stubs.") ?? [],
       scriptClasses: strArray(file, s, "scriptClasses", "stubs.") ?? [],
       modAssets: modAssetList ?? "all",
       widgetMembers: widgetMembers(file, s.widgetMembers),
     };
+    if (classOnly !== undefined && classOnly.length > 0) stubs.classOnly = classOnly;
     const scriptModules = strArray(file, s, "scriptModules", "stubs.");
     if (scriptModules !== undefined) stubs.scriptModules = scriptModules;
     out.stubs = stubs;

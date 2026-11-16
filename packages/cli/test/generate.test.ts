@@ -511,6 +511,45 @@ test("abfc generate: a mod asset whose stage files are unchanged since the last 
   }
 });
 
+test("abfc generate: a stubs.classOnly asset is read once, stubbed without own members, and not read again when its files change", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "abfc-cli-stubs-"));
+  const stage = mkdtempSync(join(tmpdir(), "abfc-cli-stage-"));
+  try {
+    const fake = setup(tmp, []);
+    fake.files[join(tmp, "abf.config.json")] = JSON.stringify({
+      mod: { name: "TestMod" },
+      backend: { kind: "bp_apply", minProtocol: 1 },
+      stubs: { classes: [BP_FAKE], scriptClasses: [THING], modAssets: [], classOnly: ["/TestMod/Items/BP_Hand"] },
+    });
+    const items = join(stage, "Content", "Items");
+    mkdirSync(items, { recursive: true });
+    writeFileSync(join(items, "BP_Hand.uasset"), "hand v1");
+    const o = { stagingPath: stage };
+    let r = await runAuto(fake, tmp, ["generate"], o);
+    assert.equal(r.code, 0, r.out);
+    assert.deepEqual(r.reads, ["/TestMod/Items/BP_Hand"], "read once");
+    const handFile = join(profileDir(tmp), "Mod", "TestMod", "Items", "BP_Hand.d.ts");
+    const hand = readFileSync(handFile, "utf8");
+    assert.doesNotMatch(hand, /Hp: int/, "no own members");
+    assert.match(hand, /class BP_Hand_C/);
+
+    // a room bake re-saves it: kept, not read
+    writeFileSync(join(items, "BP_Hand.uasset"), "hand v2 rebaked");
+    r = await runAuto(fake, tmp, ["generate"], o);
+    assert.equal(r.code, 0, r.out);
+    assert.deepEqual(r.reads, []);
+    assert.ok(existsSync(handFile));
+
+    // --full reads it again
+    r = await runAuto(fake, tmp, ["generate", "--full"], o);
+    assert.deepEqual(r.reads, ["/TestMod/Items/BP_Hand"]);
+    assert.doesNotMatch(readFileSync(handFile, "utf8"), /Hp: int/);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+    rmSync(stage, { recursive: true, force: true });
+  }
+});
+
 test("abfc generate --add: one reflect call with only that class, no mod-asset reads, recorded in lock.auto.added and kept by later runs", async () => {
   const tmp = mkdtempSync(join(tmpdir(), "abfc-cli-stubs-"));
   try {

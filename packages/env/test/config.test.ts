@@ -77,6 +77,15 @@ test("classManager.table must be a valid mod-relative path", () => {
   }
 });
 
+test("schema 2 classOnly: relative entries become /<mod>/X, a leading slash fails, absent stays absent", () => {
+  const cfg = load({ schemaVersion: 2, mod: { name: "TestMod" }, stubs: { modAssets: [], classOnly: ["Rooms/BP_Section"] } });
+  assert.deepEqual(cfg.stubs.classOnly, ["/TestMod/Rooms/BP_Section"]);
+  assert.equal(load({ schemaVersion: 2, mod: { name: "TestMod" }, stubs: { modAssets: [] } }).stubs.classOnly, undefined);
+  const e = code(() => load({ schemaVersion: 2, mod: { name: "TestMod" }, stubs: { classOnly: ["/TestMod/Rooms/BP_Section"] } }));
+  assert.equal(e.code, "ABFC1021");
+  assert.match(e.message, /stubs\.classOnly\[0\]/);
+});
+
 test("schema 2 modAssets: relative entries become /<mod>/X, a leading slash fails", () => {
   const cfg = load({ schemaVersion: 2, mod: { name: "TestMod" }, stubs: { modAssets: ["Relays/BP_X", "Y"] } });
   assert.deepEqual(cfg.stubs.modAssets, ["/TestMod/Relays/BP_X", "/TestMod/Y"]);

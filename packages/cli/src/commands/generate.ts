@@ -137,6 +137,11 @@ function readModReads(profileDir: string, identity: string): ModReads["assets"] 
   return {};
 }
 
+/** The stub of a `stubs.classOnly` asset: its class and parent, no own members (those of the parent come from the parent's stub). */
+function classOnlyStub(m: ManualAsset): ManualAsset {
+  return { ...m, variables: [], widgets: [], functions: [], events: [], ...(m.components !== undefined ? { components: [] } : {}) };
+}
+
 const ownedHash = (o: { units: string[]; variables: string[] } | undefined): string =>
   createHash("sha256").update(JSON.stringify(o ?? { units: [], variables: [] })).digest("hex");
 
@@ -201,7 +206,9 @@ async function reflectAndRead(ctx: CliContext, backend: Backend, run: StubRun): 
   // Mod assets first, so their struct references join the reflect closure.
   const modAssetsCfg = config.stubs.modAssets;
   const modDir = env.modDir.value;
-  const assetList = modAssetsCfg === "all" ? (modDir === null ? [] : listModAssets(ctx, modDir)) : modAssetsCfg;
+  const classOnly = new Set((config.stubs.classOnly ?? []).map((a) => a.toLowerCase()));
+  const listed = modAssetsCfg === "all" ? (modDir === null ? [] : listModAssets(ctx, modDir)) : modAssetsCfg;
+  const assetList = [...listed, ...(config.stubs.classOnly ?? []).filter((a) => !listed.some((l) => l.toLowerCase() === a.toLowerCase()))];
   const manual: ManualAsset[] = [];
   const owned = ownedSets(ctx.projectDir);
   const t0 = clock();
@@ -225,6 +232,20 @@ async function reflectAndRead(ctx: CliContext, backend: Backend, run: StubRun): 
           const files = run.stagingPath === "" ? null : stagePackageHash(run.stagingPath, mod, asset);
           const own = ownedHash(owned[asset]);
           const prior = priorReads[asset];
+          // A class-only asset keeps the stub of its first read whatever its files do now (only its class and parent are used).
+          const shallow = classOnly.has(asset.toLowerCase());
+          if (shallow && !run.readAllModAssets) {
+            const kept = seedManual.get(asset);
+            if (kept !== undefined || prior?.skipped === true) {
+              if (kept !== undefined) manual.push(classOnlyStub(kept));
+              else skipped++;
+              if (prior !== undefined) reads[asset] = prior;
+              else if (files !== null) reads[asset] = { files, owned: own };
+              unchanged++;
+              s.tick(i + 1, assetList.length);
+              continue;
+            }
+          }
           if (files !== null && prior !== undefined && prior.files === files && prior.owned === own) {
             const kept = seedManual.get(asset);
             if (prior.skipped === true || kept !== undefined) {
@@ -242,7 +263,8 @@ async function reflectAndRead(ctx: CliContext, backend: Backend, run: StubRun): 
           try {
             const snap = await backend.read(mod, asset);
             const text = deps.host.readFile(snap.exportPath);
-            manual.push(manualFromExport(asset, text, snap.structure, owned[asset] ?? { units: [], variables: [] }));
+            const made = manualFromExport(asset, text, snap.structure, owned[asset] ?? { units: [], variables: [] });
+            manual.push(shallow ? classOnlyStub(made) : made);
             if (files !== null) reads[asset] = { files, owned: own };
           } catch (e) {
             if (e instanceof AbfcError && e.diagnostic.code !== "ABFC4002" && e.diagnostic.code !== "ABFC4100") throw e;
