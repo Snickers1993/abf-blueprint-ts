@@ -997,6 +997,16 @@ Typical cause: a config written for an older abfc, before widgets and components
 
 Fix: remove the entries named in the warnings; report the members that are still taken from the config.
 
+### ABFC3016
+
+Severity: warning · Exit: -
+
+Meaning: an asset in `stubs.classOnly` is also one abfc builds into (its manifest lists owned units or variables). A class-only stub has no own members, so TypeScript that uses one of its components or functions fails with ABFC2060.
+
+Typical cause: a Blueprint that is mostly baked or hand-made but has its own TypeScript class adding a graph to it, moved into `stubs.classOnly` with the spawn-only ones.
+
+Fix: move the asset back to `stubs.modAssets`. The next `abfc generate` reads it again ("moved out of stubs.classOnly").
+
 ### ABFC3020
 
 Severity: warning · Exit: -

@@ -544,9 +544,45 @@ test("abfc generate: a stubs.classOnly asset is read once, stubbed without own m
     r = await runAuto(fake, tmp, ["generate", "--full"], o);
     assert.deepEqual(r.reads, ["/TestMod/Items/BP_Hand"]);
     assert.doesNotMatch(readFileSync(handFile, "utf8"), /Hp: int/);
+
+    // moved back to modAssets with its files unchanged: read again, own members back (not the kept class-only stub)
+    fake.files[join(tmp, "abf.config.json")] = JSON.stringify({
+      mod: { name: "TestMod" },
+      backend: { kind: "bp_apply", minProtocol: 1 },
+      stubs: { classes: [BP_FAKE], scriptClasses: [THING], modAssets: ["/TestMod/Items/BP_Hand"] },
+    });
+    r = await runAuto(fake, tmp, ["generate"], o);
+    assert.equal(r.code, 0, r.out);
+    assert.deepEqual(r.reads, ["/TestMod/Items/BP_Hand"], r.out);
+    assert.match(r.out, /moved out of stubs\.classOnly/);
+    assert.match(readFileSync(handFile, "utf8"), /Hp: int/);
+    r = await runAuto(fake, tmp, ["generate"], o);
+    assert.deepEqual(r.reads, [], "then kept as usual");
   } finally {
     rmSync(tmp, { recursive: true, force: true });
     rmSync(stage, { recursive: true, force: true });
+  }
+});
+
+test("abfc generate: a stubs.classOnly asset abfc builds into warns ABFC3016", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "abfc-cli-stubs-"));
+  try {
+    const fake = setup(tmp, []);
+    fake.files[join(tmp, "abf.config.json")] = JSON.stringify({
+      mod: { name: "TestMod" },
+      backend: { kind: "bp_apply", minProtocol: 1 },
+      stubs: { classes: [BP_FAKE], scriptClasses: [THING], modAssets: [], classOnly: ["/TestMod/Items/BP_Hand"] },
+    });
+    mkdirSync(join(tmp, ".abfc", "manifest"), { recursive: true });
+    writeFileSync(
+      join(tmp, ".abfc", "manifest", "BP_Hand.json"),
+      JSON.stringify({ asset: "/TestMod/Items/BP_Hand", units: [{ id: "event:Tick" }], variables: [] }),
+    );
+    const r = await runAuto(fake, tmp, ["generate"]);
+    assert.match(r.out, /ABFC3016/);
+    assert.match(r.out, /BP_Hand is in stubs\.classOnly but abfc builds into it \(1 unit/);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
   }
 });
 

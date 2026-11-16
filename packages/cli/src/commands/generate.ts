@@ -124,7 +124,8 @@ interface ModReads {
   version: number;
   /** The stub cache the entries belong to: generator and editor build. */
   identity: string;
-  assets: Record<string, { files: string; owned: string; skipped?: true }>;
+  /** `shallow`: the entry's stub was made class-only (`stubs.classOnly`), so it is read again once the asset leaves that list. */
+  assets: Record<string, { files: string; owned: string; skipped?: true; shallow?: true }>;
 }
 
 function readModReads(profileDir: string, identity: string): ModReads["assets"] {
@@ -211,6 +212,17 @@ async function reflectAndRead(ctx: CliContext, backend: Backend, run: StubRun): 
   const assetList = [...listed, ...(config.stubs.classOnly ?? []).filter((a) => !listed.some((l) => l.toLowerCase() === a.toLowerCase()))];
   const manual: ManualAsset[] = [];
   const owned = ownedSets(ctx.projectDir);
+  // A class-only stub drops the asset's own members: an asset abfc builds into (its TS uses its components) needs them.
+  for (const asset of config.stubs.classOnly ?? []) {
+    const o = Object.entries(owned).find(([a]) => a.toLowerCase() === asset.toLowerCase())?.[1];
+    if (o !== undefined && o.units.length + o.variables.length > 0) {
+      output.diag({
+        severity: "warning",
+        code: "ABFC3016",
+        message: `${asset} is in stubs.classOnly but abfc builds into it (${o.units.length} unit(s), ${o.variables.length} variable(s)); its stub has no own members, so TypeScript that uses one fails ABFC2060. Move it to stubs.modAssets.`,
+      });
+    }
+  }
   const t0 = clock();
   const readsIdentity = `${STUBGEN_VERSION}|${env.fingerprint ?? ""}`;
   const profileDirForReads = win32.join(paths.stubsDir, env.profile.id);
@@ -239,14 +251,14 @@ async function reflectAndRead(ctx: CliContext, backend: Backend, run: StubRun): 
             if (kept !== undefined || prior?.skipped === true) {
               if (kept !== undefined) manual.push(classOnlyStub(kept));
               else skipped++;
-              if (prior !== undefined) reads[asset] = prior;
-              else if (files !== null) reads[asset] = { files, owned: own };
+              if (prior !== undefined) reads[asset] = { ...prior, shallow: true };
+              else if (files !== null) reads[asset] = { files, owned: own, shallow: true };
               unchanged++;
               s.tick(i + 1, assetList.length);
               continue;
             }
           }
-          if (files !== null && prior !== undefined && prior.files === files && prior.owned === own) {
+          if (files !== null && prior !== undefined && prior.files === files && prior.owned === own && (shallow || prior.shallow !== true)) {
             const kept = seedManual.get(asset);
             if (prior.skipped === true || kept !== undefined) {
               if (kept !== undefined && prior.skipped !== true) manual.push(kept);
@@ -258,14 +270,28 @@ async function reflectAndRead(ctx: CliContext, backend: Backend, run: StubRun): 
             }
           }
           const why =
-            prior === undefined ? (run.readAllModAssets ? "--full" : run.seed === null ? "stub cache rebuilt" : "not read before") : files === null ? "no stage file" : prior.files !== files ? "files changed" : prior.owned !== own ? "owned part changed" : "no stub kept";
+            prior === undefined
+              ? run.readAllModAssets
+                ? "--full"
+                : run.seed === null
+                  ? "stub cache rebuilt"
+                  : "not read before"
+              : prior.shallow === true && !shallow
+                ? "moved out of stubs.classOnly"
+                : files === null
+                  ? "no stage file"
+                  : prior.files !== files
+                    ? "files changed"
+                    : prior.owned !== own
+                      ? "owned part changed"
+                      : "no stub kept";
           readWhy.set(why, (readWhy.get(why) ?? 0) + 1);
           try {
             const snap = await backend.read(mod, asset);
             const text = deps.host.readFile(snap.exportPath);
             const made = manualFromExport(asset, text, snap.structure, owned[asset] ?? { units: [], variables: [] });
             manual.push(shallow ? classOnlyStub(made) : made);
-            if (files !== null) reads[asset] = { files, owned: own };
+            if (files !== null) reads[asset] = { files, owned: own, ...(shallow ? { shallow: true as const } : {}) };
           } catch (e) {
             if (e instanceof AbfcError && e.diagnostic.code !== "ABFC4002" && e.diagnostic.code !== "ABFC4100") throw e;
             skipped++;
