@@ -806,7 +806,16 @@ class HirBuilder {
     if (!this.derivesFromComponent(ctype)) return bad(`${ci.path} is not an ActorComponent`, clsArg!);
     const csym = node.name ? this.checker.getSymbolAtLocation(node.name) : undefined;
     const own = csym ? this.checker.getDeclaredTypeOfSymbol(csym) : undefined;
-    if (own?.isClassOrInterface() && this.checker.getBaseTypes(own).some((b) => this.checker.getPropertyOfType(b, m.name.getText()) !== undefined)) {
+    // The asset's own `_Manual` stub lists the components a build created (`abfc generate` reads them back as hand-made): the same
+    // name and class there is this declaration, not a collision.
+    const ownStub = (p: ts.Symbol): boolean => {
+      const tags = bpTagsOfSymbol(p);
+      return tags.has("bpComponent") && tags.get("bpPath")?.[0] === `${this.cls.classPath}:${shown}` && tags.get("bpType")?.[0] === `object:${ci.path}`;
+    };
+    if (own?.isClassOrInterface() && this.checker.getBaseTypes(own).some((b) => {
+      const p = this.checker.getPropertyOfType(b, m.name.getText());
+      return p !== undefined && !ownStub(p);
+    })) {
       return bad("the name collides with a member of the parent class or a hand-made member of the asset; rename the component");
     }
     this.classMeta[ci.path] = ci.meta;
