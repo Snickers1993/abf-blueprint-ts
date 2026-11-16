@@ -724,7 +724,7 @@ test("an asset whose only news is a field is still planned, with no units", () =
 test("a changed or removed own field default of a variable in the asset is planned as variableDefaults; equal defaults plan nothing", () => {
   const snapshot = snapshotOf(node("N1", CALL, []));
   const keep = mu({ irHash: unit.hash, nodes: ["N1"], assetHash: unitStateHash(snapshot, ["N1"]), stageSyncedAt: "T1" });
-  const manifest = { ...manifestOf(keep), variables: [{ name: "Speed", type: "float", hash: "h", default: "2.5" }] } as Manifest;
+  const manifest = { ...manifestOf(keep), variables: [{ name: "Speed", type: "float", hash: "h", default: "2.5" }], variablesStageSyncedAt: stage.syncedAt } as Manifest;
   const withDefault = (def?: string): IrModule => {
     const a = ir.assets[0]!;
     const v = { name: "Speed", type: "float", ...(def !== undefined ? { default: def } : {}), flags: [], origin: span0 };
@@ -760,6 +760,36 @@ test("a changed or removed own field default of a variable in the asset is plann
   assert.deepEqual(old.diagnostics.map((d) => [d.code, d.severity]), [["ABFC2084", "warning"]]);
   assert.match(old.diagnostics[0]!.message, /cannot change the default of the existing variable Speed/);
   assert.deepEqual(old.plan.assets, []);
+});
+
+test("own field defaults are sent again after a re-sync that discarded them (not published), or a Mod Editor save; not when published", () => {
+  const snapshot = snapshotOf(node("N1", CALL, []));
+  const keep = mu({ irHash: unit.hash, nodes: ["N1"], assetHash: unitStateHash(snapshot, ["N1"]), stageSyncedAt: stage.syncedAt });
+  const a = ir.assets[0]!;
+  const irm = { ...ir, assets: [{ ...a, variables: [{ name: "Speed", type: "float", default: "4", flags: [], origin: span0 }, { name: "Plain", type: "int", flags: [], origin: span0 }, ...a.variables] }] } as unknown as IrModule;
+  const vars = [{ name: "Speed", type: "float", hash: "h", default: "4" }, { name: "Plain", type: "int", hash: "h2" }];
+  const run = (extra: Partial<Manifest>, editedInMod?: Set<string>) => {
+    const manifest = { ...manifestOf(keep), variables: vars, ...extra } as Manifest;
+    const input = { manifests: new Map([[asset, manifest]]), stage, ...(editedInMod !== undefined ? { editedInMod } : {}) };
+    return {
+      read: assetsNeedingRead(irm, input).has(asset),
+      plan: planBuild(irm, { ...input, snapshots: new Map([[asset, snapshot]]), handMadeUnits: new Map(), snapshotVariables: new Map([[asset, ["Speed", "Plain", "abfc_UpdateTarget_t0", "abfc_UpdateTarget_i0"]]]) }),
+    };
+  };
+  const stale = run({ variablesStageSyncedAt: "an older sync" });
+  assert.equal(stale.read, true);
+  assert.deepEqual(stale.plan.plan.assets[0]!.variableDefaults, { Speed: "4" }, "only fields with a default are sent");
+  assert.equal(stale.plan.plan.assets[0]!.variablesResynced, true);
+  const legacy = run({});
+  assert.deepEqual(legacy.plan.plan.assets[0]!.variableDefaults, { Speed: "4" }, "a manifest that never recorded the sync sends them once");
+  const published = run({ variablesStageSyncedAt: "an older sync", variablesPublished: true });
+  assert.equal(published.read, false);
+  assert.deepEqual(published.plan.plan.assets, []);
+  const current = run({ variablesStageSyncedAt: stage.syncedAt });
+  assert.equal(current.read, false);
+  assert.deepEqual(current.plan.plan.assets, []);
+  const saved = run({ variablesStageSyncedAt: stage.syncedAt, variablesPublished: true }, new Set([asset.toLowerCase()]));
+  assert.deepEqual(saved.plan.plan.assets[0]!.variableDefaults, { Speed: "4" }, "the Mod Editor saved it: TypeScript wins");
 });
 
 test("a new own field with a default carries it in the variable spec", () => {

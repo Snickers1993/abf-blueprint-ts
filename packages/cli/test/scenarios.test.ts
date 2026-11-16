@@ -524,6 +524,49 @@ test("(S19b) a field initializer becomes the variable default; changing it updat
   });
 });
 
+test("(S19d) a re-sync before the publish brings back the mod's old default: the next build sets the TypeScript default again", async () => {
+  await withRig({ ...OPS, variableDefaults: true }, async (r) => {
+    const base = tally("BP_Tally").replace("import type { int }", "import type { int, float }");
+    tallyOnly(r.dir, base);
+    const write = (fields: string): void =>
+      writeFileSync(join(r.dir, "src", "Tally.ts"), base.replace("  Total!: int;", `  Total!: int;\n${fields}`), "utf8");
+    write("  Speed: float = 2.5;");
+    let x = await r.run(["build"]);
+    assert.equal(x.code, 0, x.out);
+    x = await r.run(["publish"]);
+    assert.equal(x.code, 0, x.out);
+    r.backend.markPublished();
+    assert.equal(readManifest(r.dir, TA)?.variablesPublished, true);
+
+    // built, not published; then a bake saves another mod asset and the stage is copied from the mod again
+    write("  Speed: float = 4;");
+    x = await r.run(["build"]);
+    assert.equal(x.code, 0, x.out);
+    assert.equal(r.backend.variableDefault(TA, "Speed"), "4");
+    r.backend.stageStale = ["Content/Relay/BP_Relay.uasset"];
+    const before = appliedSpecs(r).length;
+    x = await r.run(["build"]);
+    assert.equal(x.code, 0, x.out);
+    assert.match(x.out, /warning ABFC4017/);
+    const specs = appliedSpecs(r).slice(before).filter((s) => s.asset === TA);
+    assert.ok(specs.some((s) => s.variable_defaults?.Speed === "4"), JSON.stringify(specs));
+    assert.equal(r.backend.variableDefault(TA, "Speed"), "4", "the stage holds the TypeScript default again, not the mod's 2.5");
+    x = await r.run(["build"]);
+    assert.match(x.out, /up to date/);
+
+    // published: a later re-sync brings the right default back, nothing is sent again
+    x = await r.run(["publish"]);
+    assert.equal(x.code, 0, x.out);
+    r.backend.markPublished();
+    r.backend.stageStale = ["Content/Relay/BP_Relay.uasset"];
+    const before2 = appliedSpecs(r).length;
+    x = await r.run(["build"]);
+    assert.equal(x.code, 0, x.out);
+    assert.ok(appliedSpecs(r).slice(before2).every((s) => s.asset !== TA || s.variable_defaults === undefined), x.out);
+    assert.equal(r.backend.variableDefault(TA, "Speed"), "4");
+  });
+});
+
 test("(S19c) a backend without variable_defaults warns ABFC2084 for a changed default and leaves it as it is", async () => {
   await withRig({ ...OPS }, async (r) => {
     const base = tally("BP_Tally").replace("import type { int }", "import type { int, float }");

@@ -330,7 +330,7 @@ async function buildInner(ctx: CliContext, session: BackendSession, rec: Recorde
   // Assets that cannot have anything to plan are not read (no drift check there; `abfc status` still reads everything), unless `readAll`.
   const tRead = performance.now();
   const existing = owned.filter((a) => !missing.has(a.path));
-  const toRead = readAll || fullRead ? new Set(existing.map((a) => a.path)) : assetsNeedingRead({ ...ir, assets: existing }, { manifests, stage, forceReplan, directorRows: caps.classManagerRows, editedInMod });
+  const toRead = readAll || fullRead ? new Set(existing.map((a) => a.path)) : assetsNeedingRead({ ...ir, assets: existing }, { manifests, stage, forceReplan, directorRows: caps.classManagerRows, editedInMod, variableDefaults: caps.variableDefaults });
   // The asset ops edited the nodes of renamed assets and of their referencers: those are read too, so drifted units are replaced now
   // (editedByAbfc) instead of reading as editor edits in `abfc status` and blaming the modder at the next real change.
   for (const p of assetOpsOutcome.edited ?? []) if (existing.some((a) => a.path === p)) toRead.add(p);
@@ -635,6 +635,12 @@ async function buildInner(ctx: CliContext, session: BackendSession, rec: Recorde
       const { default: _old, ...rest } = variables[at]!;
       variables[at] = def === null ? rest : { ...rest, default: def };
     }
+    // Own fields' defaults: in the stage of this sync when this build sent them all (after a re-sync), created the asset's fields,
+    // or they were already there; changed ones are not published any more.
+    const varsInStage = old === null || a.variablesResynced === true || (old.variablesStageSyncedAt ?? null) === stage.syncedAt;
+    const variablesStageSyncedAt = varsInStage ? stage.syncedAt : old?.variablesStageSyncedAt;
+    const varsChanged = a.variables.length > 0 || Object.keys(a.variableDefaults ?? {}).length > 0;
+    const variablesPublished = !varsChanged && old?.variablesPublished === true;
     // Class defaults: the hash is recorded only when pass 5 succeeded, so a failed pass is repeated by the next build.
     const defaultsDone = a.defaults !== undefined && outcome.defaultsApplied;
     const classDefaultsHash = defaultsDone ? a.defaults!.hash : old?.classDefaultsHash;
@@ -673,6 +679,8 @@ async function buildInner(ctx: CliContext, session: BackendSession, rec: Recorde
       variables,
       ...(classDefaultsHash !== undefined ? { classDefaultsHash } : {}),
       ...(classDefaultsStageSyncedAt !== undefined ? { classDefaultsStageSyncedAt } : {}),
+      ...(variablesStageSyncedAt !== undefined ? { variablesStageSyncedAt } : {}),
+      ...(variablesPublished ? { variablesPublished: true as const } : {}),
       // Kept only when this build planned no defaults pass; a planned pass that did not succeed clears it (the next build must apply the defaults).
       ...(a.defaults === undefined && old?.classDefaultsPublished === true ? { classDefaultsPublished: true as const } : {}),
       ...(directorRow !== undefined ? { directorRow } : {}),
@@ -691,6 +699,7 @@ async function buildInner(ctx: CliContext, session: BackendSession, rec: Recorde
       units: units.map((u) => (appliedIds.has(u.id) ? { ...u, irHash: "" } : u)),
       ...(old?.classDefaultsHash !== undefined ? { classDefaultsHash: old.classDefaultsHash } : {}),
       ...(old?.classDefaultsStageSyncedAt !== undefined ? { classDefaultsStageSyncedAt: old.classDefaultsStageSyncedAt } : {}),
+      ...(old?.variablesStageSyncedAt !== undefined ? { variablesStageSyncedAt: old.variablesStageSyncedAt } : {}),
       ...(old?.directorRow !== undefined ? { directorRow: old.directorRow } : {}),
       ...(retiredUnpublished.length > 0 ? { retiredUnpublished } : {}),
       ...(source !== undefined ? { source } : {}),

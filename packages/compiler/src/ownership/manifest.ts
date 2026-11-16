@@ -42,6 +42,10 @@ export interface Manifest {
   classDefaultsHash?: string;
   /** `StageStatus.syncedAt` of the stage the class defaults were applied to (a resync discards them). */
   classDefaultsStageSyncedAt?: string | null;
+  /** `StageStatus.syncedAt` of the stage the own fields' defaults were last applied to in full (a re-sync before a publish discards them). */
+  variablesStageSyncedAt?: string | null;
+  /** The defaults recorded in `variables` reached the mod (a publish copied the asset while the stage still held `variablesStageSyncedAt`). */
+  variablesPublished?: true;
   /**
    * The class defaults recorded above reached the mod (a publish copied the asset while the stage still held the sync they were
    * applied to). A later re-sync copies from the mod, so they are still there and the pass does not run again; cleared (absent)

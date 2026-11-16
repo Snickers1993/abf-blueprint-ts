@@ -375,6 +375,12 @@ async function copyToMod(
     if (list.syncedAt === null || (m.classDefaultsStageSyncedAt ?? null) !== list.syncedAt) continue;
     writeManifest(ctx.projectDir, { ...m, classDefaultsPublished: true });
   }
+  // Own fields' defaults applied to the stage's current sync are in the mod now too.
+  for (const asset of assets) {
+    const m = readManifest(ctx.projectDir, asset);
+    if (m === null || m.variablesPublished === true || list.syncedAt === null || (m.variablesStageSyncedAt ?? null) !== list.syncedAt) continue;
+    writeManifest(ctx.projectDir, { ...m, variablesPublished: true });
+  }
   finishPending(ctx, list, canDelete, r);
   // What the mod holds now: a later re-sync (the mod saved before the next publish, a publish that fails) falls back to these entries
   // for the nodes it brings back, so abfc's published units are never mistaken for hand-made ones.

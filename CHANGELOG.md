@@ -77,6 +77,7 @@ abfc uses semantic versioning for its command-line surface: the commands, their 
 
 ### Fixed
 
+- A field default changed by a build that was never published came back as the mod's old value after the stage was copied from the mod again (ABFC4017 or `--resync`): the manifest already recorded the new default, so later builds saw no change and never set it again. The manifest now records which stage sync the defaults were applied to (`variablesStageSyncedAt`) and whether a publish carried them (`variablesPublished`); after a re-sync that discarded them, or a Mod Editor save of the asset, every own field's default is sent again. The first build with this version sends them once for every asset with field defaults.
 - Reading a variable or component that a parent class declares (`this.IsDepleted` in a child of a game Blueprint) names that class as the get's MemberParent, with a Self node as its Target; the self-context get had no pins in bp_apply's scratch Blueprint, so the apply failed with "no pin 'IsDepleted'".
 
 

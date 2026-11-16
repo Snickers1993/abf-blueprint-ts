@@ -157,7 +157,7 @@ function defaultsStale(asset: IrModule["assets"][number], manifest: Manifest | n
  */
 export function assetsNeedingRead(
   ir: IrModule,
-  input: { manifests: Map<string, Manifest | null>; stage: StageInfo; forceReplan?: Set<string>; directorRows?: boolean; editedInMod?: Set<string> },
+  input: { manifests: Map<string, Manifest | null>; stage: StageInfo; forceReplan?: Set<string>; directorRows?: boolean; editedInMod?: Set<string>; variableDefaults?: boolean },
 ): Set<string> {
   const out = new Set<string>();
   for (const asset of ir.assets) {
@@ -179,6 +179,7 @@ export function assetsNeedingRead(
       (manifest?.units.some((mu) => !asset.units.some((unit) => unit.id === mu.id)) ?? false) ||
       defaultsStale(asset, manifest, input.stage, input.directorRows === true, input.editedInMod) ||
       fieldsStale(asset, manifest) ||
+      (input.variableDefaults !== false && variablesUnsynced(asset, manifest, input.stage, input.editedInMod)) ||
       parentStale(asset, manifest);
     if (need) out.add(asset.path);
   }
@@ -193,6 +194,17 @@ export function assetsNeedingRead(
 function parentStale(asset: IrModule["assets"][number], manifest: Manifest | null): boolean {
   if (manifest?.parent === undefined || asset.create === undefined || asset.structFields !== undefined) return false;
   return manifest.parent.toLowerCase() !== asset.create.parent.toLowerCase();
+}
+
+/**
+ * The defaults the manifest records for the asset's own fields may not be in the staged copy: the stage was re-synced from the mod
+ * after they were applied and before a publish copied them (or a legacy manifest that never recorded the sync), or the Mod Editor
+ * saved the asset. The next build then sends every own field's default again (TS wins), as `defaultsStale` does for class defaults.
+ */
+export function variablesUnsynced(asset: IrModule["assets"][number], manifest: Manifest | null, stage: StageInfo, editedInMod?: Set<string>): boolean {
+  if (manifest === null || !asset.variables.some((v) => v.temp !== true && v.default !== undefined)) return false;
+  if (editedInMod?.has(asset.path.toLowerCase()) === true) return true;
+  return (manifest.variablesStageSyncedAt ?? null) !== stage.syncedAt && manifest.variablesPublished !== true;
 }
 
 /** Own fields (non-temp variables) of the asset that differ from what the manifest recorded (new, retyped or gone from the TS). */
@@ -335,10 +347,12 @@ export function planBuild(ir: IrModule, input: PlanInput): PlanResult {
     const newFields = fieldVars.filter((v) => !declared.has(v.name) || retypedInAsset.has(v.name) || retypedFields.has(v.name));
     // A changed or removed initializer of a field that stays in the asset updates its default in place (new and recreated fields carry it in `variables`).
     const variableDefaults: Record<string, string | null> = {};
+    const resendDefaults = input.variableDefaults !== false && variablesUnsynced(asset, manifest, input.stage, input.editedInMod);
     for (const v of fieldVars) {
       if (!declared.has(v.name) || retypedInAsset.has(v.name) || retypedFields.has(v.name)) continue;
       const mv = manifest?.variables.find((m) => m.name === v.name);
-      if (mv === undefined || (mv.default ?? null) === (v.default ?? null)) continue;
+      if (mv === undefined) continue;
+      if ((mv.default ?? null) === (v.default ?? null) && !(resendDefaults && v.default !== undefined)) continue;
       if (input.variableDefaults === false) {
         diagnostics.push({
           severity: "warning",
@@ -750,6 +764,7 @@ export function planBuild(ir: IrModule, input: PlanInput): PlanResult {
       ...(removeGraphNodes.length > 0 ? { removeGraphNodes } : {}),
       ...(removeVariables.length > 0 ? { removeVariables } : {}),
       ...(hasVariableDefaults ? { variableDefaults } : {}),
+      ...(resendDefaults ? { variablesResynced: true as const } : {}),
       ...(removeFunctionSet.size > 0 ? { removeFunctions: [...removeFunctionSet].sort() } : {}),
       ...(functions.length > 0 ? { functions } : {}),
       ...(forgetVariables.length > 0 ? { forgetVariables } : {}),
