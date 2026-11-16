@@ -43,7 +43,7 @@ import { backendIdOf, resolveStubRequest, shortName, stubsNeedWork, usedPlacehol
 import type { StubMode } from "../stubsauto.js";
 import { stagePackageHash } from "../readcache.js";
 import { refreshTagsFile } from "../tags.js";
-import { BackendSession, Recorder, backendStartOptions, pruneManifestsToStage, since } from "./common.js";
+import { BackendSession, Recorder, backendStartOptions, missSummary, pruneManifestsToStage, readCacheFor, readCacheOf, since, useReadCache } from "./common.js";
 import { ensureStage } from "./stage.js";
 
 /** Folders of the mod's Content that are never stubbed. */
@@ -210,6 +210,8 @@ async function reflectAndRead(ctx: CliContext, backend: Backend, run: StubRun): 
   const priorReads = run.seed === null || run.readAllModAssets ? {} : readModReads(profileDirForReads, readsIdentity);
   const reads: ModReads["assets"] = {};
   let unchanged = 0;
+  /** Why each mod asset that was read went to the editor (shown after the reads, so a slow run says what changed). */
+  const readWhy = new Map<string, number>();
   if (!run.readModAssets) {
     manual.push(...run.seed!.manual);
   } else if (assetList.length > 0) {
@@ -234,6 +236,9 @@ async function reflectAndRead(ctx: CliContext, backend: Backend, run: StubRun): 
               continue;
             }
           }
+          const why =
+            prior === undefined ? (run.readAllModAssets ? "--full" : run.seed === null ? "stub cache rebuilt" : "not read before") : files === null ? "no stage file" : prior.files !== files ? "files changed" : prior.owned !== own ? "owned part changed" : "no stub kept";
+          readWhy.set(why, (readWhy.get(why) ?? 0) + 1);
           try {
             const snap = await backend.read(mod, asset);
             const text = deps.host.readFile(snap.exportPath);
@@ -261,7 +266,7 @@ async function reflectAndRead(ctx: CliContext, backend: Backend, run: StubRun): 
         total: assetList.length,
         slowHint: SLOW_BACKEND_HINT,
         done: () =>
-          `Read ${manual.length} mod asset(s)${unchanged > 0 ? ` (${unchanged} unchanged since the last generate, not read again)` : ""}${skipped > 0 ? `, ${skipped} skipped` : ""}`,
+          `Read ${manual.length} mod asset(s)${unchanged > 0 ? ` (${unchanged} unchanged since the last generate, not read again)` : ""}${skipped > 0 ? `, ${skipped} skipped` : ""}${readWhy.size > 0 ? `; from the editor: ${[...readWhy].map(([w, n]) => `${n} ${w}`).join(", ")}` : ""}`,
       },
     );
   }
@@ -567,12 +572,22 @@ export async function generateStubs(ctx: CliContext, backend: Backend, mode: Stu
       fix: "point ABFC_BACKEND_DIR at a checkout that provides reflect (see docs/backend.md).",
     });
   }
+  const tStage = clock();
   const { resynced, status: stageNow } = await ensureStage(backend, env, config, {
     resync: mode === "explicit" ? flags.resync : false,
     warn: (d) => output.diag(d),
     progress: ctx.progress,
   });
-  if (resynced) await pruneManifestsToStage(ctx, backend, mod);
+  // The re-sync's manifest check reads every owned asset: from the read cache when its files are as an earlier read saw them
+  // (it used to read all of them from the editor, about 30 s each, on every `generate --resync`). `--full` reads from the editor.
+  if (!flags.full) useReadCache(ctx, readCacheFor(ctx, info, stageNow.stagingPath));
+  if (resynced) {
+    const before = readCacheOf(ctx)?.missed.length ?? 0;
+    await pruneManifestsToStage(ctx, backend, mod);
+    const why = missSummary(ctx, before);
+    if (why !== "") output.info(`after the re-sync, ${why}`, "dim");
+  }
+  recordRun(paths.runsFile, { at: at(), step: "stubs.stage", seconds: (clock() - tStage) / 1000, ok: true, mode: "cold" });
 
   // The class catalog of this editor build: the file when it is current, else from the backend.
   let catalog: { catalog: Catalog; sha256: string } | null = flags.refresh ? null : readCatalog(profileDir);

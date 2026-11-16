@@ -24,7 +24,6 @@ import { win32 } from "node:path";
 import type { CliContext } from "../context.js";
 import { SLOW_BACKEND_HINT } from "../progress.js";
 import { readUnitCache, stubLockHashOf, writeUnitCache } from "../unitcache.js";
-import { ReadCache, readCacheIdentity } from "../readcache.js";
 import type { UnitCache } from "../unitcache.js";
 import {
   BackendSession,
@@ -39,6 +38,8 @@ import {
   previousNames,
   pruneManifestsToStage,
   readAsset,
+  missSummary,
+  readCacheFor,
   readCacheOf,
   sourceMapOf,
   since,
@@ -64,27 +65,6 @@ function writeCache(ctx: CliContext, owned: IrAsset[], cache: UnitCache, stubLoc
     next[a.path] = units;
   }
   writeUnitCache(win32.join(ctx.paths.cacheDir, "units.json"), next);
-}
-
-/**
- * Why the editor was asked for reads the cache could not serve (the misses after `from`), e.g. `read 3 from the editor (2 own files
- * changed, 1 because Rooms/BP_X changed)`; "" when the cache served everything or there is no cache.
- */
-function missSummary(ctx: CliContext, from: number): string {
-  const missed = readCacheOf(ctx)?.missed.slice(from) ?? [];
-  if (missed.length === 0) return "";
-  const prefix = `/${ctx.config.mod.name}/`;
-  const counts = new Map<string, number>();
-  for (const m of missed) {
-    const label =
-      m.reason === "dep" ? `because ${m.dep?.startsWith(prefix) === true ? m.dep.slice(prefix.length) : m.dep} changed`
-      : m.reason === "files" ? "own files changed"
-      : m.reason === "new" ? "not read before"
-      : m.reason === "backend" ? "read with another backend before"
-      : "cached text missing";
-    counts.set(label, (counts.get(label) ?? 0) + 1);
-  }
-  return `read ${missed.length} from the editor (${[...counts].map(([l, n]) => `${n} ${l}`).join(", ")})`;
 }
 
 /** real node name -> `<unit id>/<IR node id>` */
@@ -220,15 +200,7 @@ async function buildInner(ctx: CliContext, session: BackendSession, rec: Recorde
   // Reads of assets whose stage files (and referenced mod files) are byte-identical to an earlier read come from .abfc/cache/reads,
   // not the editor: after a re-sync that is every asset nobody saved. `--full` (build and publish) reads everything from the editor.
   const fullRead = args.flags.full;
-  useReadCache(
-    ctx,
-    fullRead || stage.stagingPath === ""
-      ? null
-      : new ReadCache(paths.cacheDir, stage.stagingPath, mod, readCacheIdentity({ server: info.serverVersion, engine: info.engineVersion, ext: info.extensions, caps, profile: profile.id }), [
-          // reads made before the stub lock left the identity (same backend and editor): still valid, moved over on the first hit
-          readCacheIdentity({ server: info.serverVersion, engine: info.engineVersion, ext: info.extensions, caps, stubs: stubLockHashOf(readLock(win32.join(ctx.paths.stubsDir, profile.id))), profile: profile.id }),
-        ]),
-  );
+  useReadCache(ctx, fullRead ? null : readCacheFor(ctx, info, stage.stagingPath));
   // The assets the Mod Editor saved (their files caused the re-sync): their class defaults are applied again, TypeScript wins.
   const editedInMod = new Set<string>();
   for (const rel of changedInMod) {

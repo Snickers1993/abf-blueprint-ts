@@ -14,7 +14,8 @@ import { SLOW_BACKEND_HINT } from "../progress.js";
 import { backendInfoDiagnostics } from "./backend-version.js";
 import { formatTimings, recordRun } from "../runs.js";
 import type { RunEntry } from "../runs.js";
-import type { ReadCache } from "../readcache.js";
+import { ReadCache, readCacheIdentity } from "../readcache.js";
+import { stubLockHashOf } from "../unitcache.js";
 
 /**
  * A codegen epoch, not the release version: it is stored in units.json, and a change marks every unit for forceReplan
@@ -244,6 +245,40 @@ export function sourceMapOf(asset: IrAsset, names: Record<string, string>): Sour
  */
 export function unitsHeldByStage<U extends ManifestUnit>(units: readonly U[], stage: Map<string, T3dNode>): U[] {
   return units.filter((u) => u.adopt !== null || u.nodes.every((n) => stage.has(n)) || missingOnlyEngineRewritten(u, stage));
+}
+
+/**
+ * The read cache of a staging copy (null when the stage path is unknown). Its identity is the backend and editor; reads cached by
+ * versions that also keyed on the stub lock are accepted and moved over.
+ */
+export function readCacheFor(ctx: CliContext, info: BackendInfo, stagingPath: string): ReadCache | null {
+  if (stagingPath === "") return null;
+  const profile = ctx.env.profile;
+  const base = { server: info.serverVersion, engine: info.engineVersion, ext: info.extensions, caps: info.capabilities };
+  return new ReadCache(ctx.paths.cacheDir, stagingPath, ctx.config.mod.name, readCacheIdentity({ ...base, profile: profile.id }), [
+    readCacheIdentity({ ...base, stubs: stubLockHashOf(readLock(win32.join(ctx.paths.stubsDir, profile.id))), profile: profile.id }),
+  ]);
+}
+
+/**
+ * Why the editor was asked for reads the cache could not serve (the misses after `from`), e.g. `read 3 from the editor (2 own files
+ * changed, 1 because Rooms/BP_X changed)`; "" when the cache served everything or there is no cache.
+ */
+export function missSummary(ctx: CliContext, from: number): string {
+  const missed = readCacheOf(ctx)?.missed.slice(from) ?? [];
+  if (missed.length === 0) return "";
+  const prefix = `/${ctx.config.mod.name}/`;
+  const counts = new Map<string, number>();
+  for (const m of missed) {
+    const label =
+      m.reason === "dep" ? `because ${m.dep?.startsWith(prefix) === true ? m.dep.slice(prefix.length) : m.dep} changed`
+      : m.reason === "files" ? "own files changed"
+      : m.reason === "new" ? "not read before"
+      : m.reason === "backend" ? "read with another backend before"
+      : "cached text missing";
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  return `read ${missed.length} from the editor (${[...counts].map(([l, n]) => `${n} ${l}`).join(", ")})`;
 }
 
 /**

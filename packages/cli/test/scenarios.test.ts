@@ -1211,6 +1211,15 @@ test("(S40) after a re-sync the build reads only assets whose files changed sinc
     assert.match(x.out, /warning ABFC4017/);
     assert.equal(reads(), first, "no bp_read after a re-sync that left the owned assets' files as they were");
 
+    // generate --resync checks the manifests against the re-synced stage through the same cache
+    const owned = ["/TestMod/Relay/BP_Relay", "/TestMod/BP_Tally"];
+    const ownedReads = (): number => r.backend.calls.filter((c) => c.tool === "bp_read" && owned.includes(String(c.asset))).length;
+    const ownedBefore = ownedReads();
+    // (the fake backend cannot reflect, so the command stops after the stage step; the re-sync and its check ran)
+    x = await r.run(["generate", "--resync"]);
+    assert.match(x.out, /does not reflect/);
+    assert.equal(ownedReads(), ownedBefore, "the re-sync's manifest check of generate reads no owned asset from the editor");
+
     // An editor edit of an owned asset changes its file: only that asset is read from the editor (and the edit is found, TS wins).
     r.backend.stageStale = ["Content/Tally.uasset"];
     r.backend.addHandMadeVariable("/TestMod/BP_Tally", "HandMade", "bool");

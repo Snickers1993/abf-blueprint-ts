@@ -112,6 +112,8 @@ export interface RecordedCall {
   /** `bp_apply` label (`main`, `main-a`, `main-b`, `tags`). */
   label?: string;
   specs?: Array<Record<string, any>>;
+  /** `bp_read`: the asset read. */
+  asset?: string;
 }
 
 export interface FakeBackendOptions {
@@ -740,7 +742,7 @@ export class FakeBackend implements Backend {
   }
 
   async read(_mod: string, asset: string): Promise<AssetSnapshot> {
-    this.calls.push({ tool: "bp_read" });
+    this.calls.push({ tool: "bp_read", asset });
     if (this.failReadsAfterResync && this.resynced) throw new Error("fake bp_read failed");
     this.lastWarm = this.warm;
     const a = this.assets.get(asset);
