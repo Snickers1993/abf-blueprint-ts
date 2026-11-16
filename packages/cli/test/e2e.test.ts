@@ -954,7 +954,7 @@ test("(g2) a stage re-synced from a published mod that holds the built graphs: r
   });
 });
 
-test("(h) native pin types: one main bp_apply call, no phase B, no pin_types on casts; doctor says native", async () => {
+test("(h) native pin types: one main bp_apply call (comment boxes included), no phase B, no pin_types on casts; doctor says native", async () => {
   await withRig({ backendInfo: true, handMadeEvent: false }, async (r) => {
     let x = await r.run(["doctor"]);
     assert.equal(x.code, 0, x.out);
@@ -964,7 +964,7 @@ test("(h) native pin types: one main bp_apply call, no phase B, no pin_types on 
     assert.equal(x.code, 0, x.out);
     assert.doesNotMatch(x.out, /ABFC4012/);
     assert.match(x.out, /\(route: native\)/);
-    assert.deepEqual(r.backend.applyLabels(), ["main", "tags"]);
+    assert.deepEqual(r.backend.applyLabels(), ["main"], "the comment boxes go in the main call");
     const main0 = r.backend.calls.find((c) => c.label === "main")!.specs![0]!;
     const nodes: Array<Record<string, any>> = main0.graphs[0].add;
     assert.equal(nodes.filter((n) => n.k === "cast").length, 2);

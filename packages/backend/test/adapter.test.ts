@@ -190,20 +190,19 @@ test("tag spec: one comment box per unit, above and left of the origin", () => {
   assert.match(add[0]!.props![2]!, /^NodeHeight=\d+$/);
 });
 
-test("applyPlan on the native route: one main call, then the tag pass; node ids and tag names are mapped", async () => {
+test("applyPlan on the native route: one main call that carries the comment boxes; node ids and tag names are mapped", async () => {
   const c = caps(true, true);
   const ids = nodeIdsFor(plan, c);
-  const backend = new FakeBackend((call) =>
-    call.label === "main"
-      ? result({ assets: [{ asset: asset.asset, node_ids: ids }] })
-      : result({ assets: [{ asset: asset.asset, node_ids: { "graph:0": { cmt_UpdateTarget: "EdGraphNode_Comment_0" } } }] }),
-  );
+  const withTag = { ...ids, "graph:0": { ...(ids["graph:0"] ?? {}), cmt_UpdateTarget: "EdGraphNode_Comment_0" } };
+  const backend = new FakeBackend(() => result({ assets: [{ asset: asset.asset, node_ids: withTag }] }));
   const timings: string[] = [];
   const out = await applyPlan(backend, plan, c, profile, { cacheDir: "cache", record: (s) => timings.push(s) });
   assert.equal(out.ok, true);
-  assert.deepEqual(backend.calls.map((x) => x.label), ["main", "tags"]);
+  assert.deepEqual(backend.calls.map((x) => x.label), ["main"]);
   assert.equal(backend.calls[0]!.specs.length, 1);
-  assert.deepEqual(timings, ["apply.main", "apply.tags"]);
+  const sent = backend.calls[0]!.specs[0]! as { graphs: Array<{ add: Array<{ id: string }> }> };
+  assert.ok(sent.graphs[0]!.add.some((n) => n.id === "cmt_UpdateTarget"), "the comment box is in the main spec");
+  assert.deepEqual(timings, ["apply.main"]);
   const a = out.perAsset[0]!;
   assert.equal(a.nodeIds["event:UpdateTarget/cast0"], realName("UpdateTarget_cast0"));
   assert.equal(Object.keys(a.nodeIds).length, unit.nodes.length);
@@ -212,13 +211,35 @@ test("applyPlan on the native route: one main call, then the tag pass; node ids 
   assert.equal(a.tagWarning, undefined);
 });
 
-test("applyPlan: a failing tag pass is a warning, a failing main pass skips the tags", async () => {
+test("applyPlan with ABFC_TAG_PASS=separate: one main call, then the tag pass; node ids and tag names are mapped", async () => {
+  process.env["ABFC_TAG_PASS"] = "separate";
+  try {
+    const c = caps(true, true);
+    const ids = nodeIdsFor(plan, c);
+    const backend = new FakeBackend((call) =>
+      call.label === "main"
+        ? result({ assets: [{ asset: asset.asset, node_ids: ids }] })
+        : result({ assets: [{ asset: asset.asset, node_ids: { "graph:0": { cmt_UpdateTarget: "EdGraphNode_Comment_0" } } }] }),
+    );
+    const timings: string[] = [];
+    const out = await applyPlan(backend, plan, c, profile, { cacheDir: "cache", record: (s) => timings.push(s) });
+    assert.equal(out.ok, true);
+    assert.deepEqual(backend.calls.map((x) => x.label), ["main", "tags"]);
+    assert.deepEqual(timings, ["apply.main", "apply.tags"]);
+    assert.deepEqual(out.perAsset[0]!.tagNames, { "event:UpdateTarget": "EdGraphNode_Comment_0" });
+  } finally {
+    delete process.env["ABFC_TAG_PASS"];
+  }
+});
+
+test("applyPlan: a failing separate tag pass is a warning, a failing main pass skips the tags", async () => {
   const c = caps(true, true);
   const ids = nodeIdsFor(plan, c);
   const tagFails = new FakeBackend((call) =>
     call.label === "main" ? result({ assets: [{ asset: asset.asset, node_ids: ids }] }) : result({ ok: false, error: "nope" }),
   );
-  const a = await applyPlan(tagFails, plan, c, profile, { cacheDir: "cache", record: () => {} });
+  process.env["ABFC_TAG_PASS"] = "separate";
+  const a = await applyPlan(tagFails, plan, c, profile, { cacheDir: "cache", record: () => {} }).finally(() => delete process.env["ABFC_TAG_PASS"]);
   assert.equal(a.ok, true);
   assert.equal(a.perAsset[0]!.tagWarning?.code, "ABFC5101");
   assert.equal(a.perAsset[0]!.tagName, null);

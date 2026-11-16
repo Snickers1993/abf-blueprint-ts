@@ -62,7 +62,7 @@ function plannedWithDefaults(): ApplyPlan {
   };
 }
 
-test("pass 5 sends one python spec per asset after the tag pass; ABFC2070 lines become warnings", async () => {
+test("pass 5 sends one python spec per asset after the main pass; ABFC2070 lines become warnings", async () => {
   const plan = plannedWithDefaults();
   const c = caps(true, true);
   const ids = nodeIdsFor(plan, c);
@@ -75,11 +75,11 @@ test("pass 5 sends one python spec per asset after the tag pass; ABFC2070 lines 
   const timings: string[] = [];
   const out = await applyPlan(backend, plan, c, profile, { cacheDir: "cache", record: (s) => timings.push(s) });
   assert.equal(out.ok, true);
-  assert.deepEqual(backend.calls.map((x) => x.label), ["main", "tags", "defaults"]);
-  assert.deepEqual(backend.calls[2]!.specs, [renderDefaultsSpec(asset, c)]);
-  const sent = backend.calls[2]!.specs[0]! as { raw: Array<{ kind: string }> };
+  assert.deepEqual(backend.calls.map((x) => x.label), ["main", "defaults"]);
+  assert.deepEqual(backend.calls[1]!.specs, [renderDefaultsSpec(asset, c)]);
+  const sent = backend.calls[1]!.specs[0]! as { raw: Array<{ kind: string }> };
   assert.equal(sent.raw[0]?.kind, "python");
-  assert.deepEqual(timings, ["apply.main", "apply.tags", "apply.defaults"]);
+  assert.deepEqual(timings, ["apply.main", "apply.defaults"]);
   assert.equal(out.perAsset[0]!.defaultsApplied, true);
   assert.equal(out.perAsset[0]!.defaultsWarnings[0]!.code, "ABFC2070");
 });

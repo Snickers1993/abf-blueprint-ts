@@ -454,7 +454,7 @@ export function dependencyOrder(items: Array<{ path: string; text: string }>): n
   return out;
 }
 
-/** Applies the plan: one main pass (native pin types, or the two-phase fallback), then the tag pass, then the class-defaults pass (pass 5). */
+/** Applies the plan: one main pass (native pin types, or the two-phase fallback) that also carries the ownership comment boxes where it can, a tag pass for the rest, then the class-defaults pass (pass 5). */
 export async function applyPlan(
   backend: Backend,
   plan: ApplyPlan,
@@ -480,6 +480,19 @@ export async function applyPlan(
   const specs = order.map((i) => rendered[i]!);
   const refs = unitAssets.map((a, i) => patchRefs(a, specs[i]!, caps, profile));
   const needsFallback = !caps.pinTypes && refs.some((r) => r.length > 0);
+  // The ownership comment boxes go in the main call when every graph they go in is already in it (one backend job less, about
+  // as long as the main one on a warm session); the two-phase route and ABFC_TAG_PASS=separate keep the separate tag pass.
+  const inlineTags = new Set<number>();
+  if (!needsFallback && process.env["ABFC_TAG_PASS"] !== "separate") {
+    unitAssets.forEach((a, i) => {
+      if (a.units.length === 0) return;
+      const graphs = specs[i]!.graphs ?? [];
+      const tagSpec = renderTagSpec(a, a.units, profile);
+      if (!(tagSpec.graphs ?? []).every((t) => graphs.some((g) => g.graph === t.graph))) return;
+      for (const t of tagSpec.graphs ?? []) graphs.find((g) => g.graph === t.graph)!.add.push(...t.add);
+      inlineTags.add(i);
+    });
+  }
 
   let ok: boolean;
   let last: BpApplyResult;
@@ -525,8 +538,19 @@ export async function applyPlan(
   );
   if (!ok) return { ok: false, perAsset };
 
+  for (const i of inlineTags) {
+    const a = unitAssets[i]!;
+    const out = perUnitAsset[i]!;
+    const graphs = specs[i]!.graphs ?? [];
+    const ids = entryFor(last, a.asset, i)?.node_ids ?? {};
+    for (const u of a.units) {
+      const real = ids[`graph:${graphs.findIndex((g) => g.graph === u.unit.graph)}`]?.[`cmt_${slug(u.unit.name)}`];
+      if (real !== undefined) out.tagNames[u.unit.id] = real;
+    }
+    out.tagName = Object.values(out.tagNames)[0] ?? null;
+  }
   // Only assets with units get a comment box (an asset with only removals has nothing to tag).
-  const tagAssets = unitAssets.map((a, i) => ({ a, i })).filter((x) => x.a.units.length > 0);
+  const tagAssets = unitAssets.map((a, i) => ({ a, i })).filter((x) => x.a.units.length > 0 && !inlineTags.has(x.i));
   if (tagAssets.length > 0) {
     const tagSpecs = tagAssets.map((x) => renderTagSpec(x.a, x.a.units, profile));
     const tag = await backend.applySpecs(plan.mod, tagSpecs, { label: "tags", cacheDir: o.cacheDir });

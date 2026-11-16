@@ -10,6 +10,7 @@ abfc uses semantic versioning for its command-line surface: the commands, their 
 
 ### Added
 
+- The ownership comment boxes go in the main bp_apply call instead of a separate tag call, so a build runs one backend job less (the tag job took about as long as the main one on a warm session, 56 s in one measured build). The two-phase route keeps the separate tag pass, and `ABFC_TAG_PASS=separate` brings it back.
 - Faster builds after a re-sync or a defaults-only change (measured on one mod project: about 12 of a 15 minute build was the first item, several minutes of most others the second):
   - An applied asset with no applied unit (it only got its class defaults, variable defaults or removals, as every asset does after `--resync`) is no longer read back from the editor after the apply: nothing in it needed the export. `.abfc/runs.jsonl` times this step as `build.record` (its `units` count the read-backs that remain) and the re-sync's manifest check as `build.prune`.
   - The read cache keeps a package that an export only names as a default value (`DefaultObject=`, `DefaultValue=`: a class a director spawns, a mesh) by presence instead of by bytes, so a room bake that saves the section Blueprints again no longer forces a re-read of every Blueprint that spawns them. Its identity no longer includes the stub lock (an export does not depend on the stubs); reads cached by the previous version stay valid and move over on their first use.

@@ -449,7 +449,7 @@ Version check: abfc does not rely on the server's semver alone. The backend expo
 | pass 3 bodies | `functions[].nodes/wires` for new functions. Changed functions and events get `graphs: [{graph, remove: [old names], add, wires}]`, addressing the shell by the real name from `node_ids`. |
 | pass 4 retire | `remove_variables`, `remove_functions`, `graphs[].remove` |
 | pass 5 defaults | `raw: [{kind: "python", code}]` with a generated, fixed template (CDO `set_editor_property` / `set_actor_tick_interval`; `bStartWithTickEnabled` is not in the template until verified) |
-| pass 6 tags | `graphs[].add` of `k:"node"` `EdGraphNode_Comment` |
+| pass 6 tags | `graphs[].add` of `k:"node"` `EdGraphNode_Comment`, in the main call's graph entries when every graph they go in is already there (otherwise, on the two-phase route, or with `ABFC_TAG_PASS=separate`, a separate tag call) |
 | node with `sem` | the matching `k` (`call`, `get`, `set`, `event`, `override`, `branch`, `sequence`, `cast`, `self`, `spawn`, `create_widget`, dispatchers) |
 | node without `sem` | `{k: "node", class, props}` |
 
