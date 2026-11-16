@@ -12,7 +12,7 @@ const here = fileURLToPath(new URL("./", import.meta.url));
 const phase2Dir = fileURLToPath(new URL("../../test/fixtures/phase2", import.meta.url));
 const profile = JSON.parse(readFileSync(fileURLToPath(new URL("../../../env/profiles/ue5.4.4-1050002.json", import.meta.url)), "utf8")) as Profile;
 
-// The Return Hook shape: cast the hit actor, `if (isValid(pawn)) { ...; return; }`, then the wall path. A failed cast must reach the
+// A grapple-hook shape: cast the hit actor, `if (isValid(pawn)) { ...; return; }`, then the wall path. A failed cast must reach the
 // wall path (the else side), not end the event.
 const SOURCE = `import { blueprint, cast, event, isValid } from "@abfc/runtime";
 import { Actor, FakeController } from "/Script/FakeEngine";
