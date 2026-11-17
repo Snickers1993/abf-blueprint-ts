@@ -1,0 +1,298 @@
+diff --git a/abfc_tools.py b/abfc_tools.py
+index 7c899e1..499c7d9 100644
+--- a/abfc_tools.py
++++ b/abfc_tools.py
+@@ -21,7 +21,7 @@ import headless     # noqa: E402
+ import staging      # noqa: E402
+ 
+ EXT_PROTOCOL = 1
+-FEATURES = ["reflect", "compile_node_refs", "bp_read_seconds", "catalog"]
++FEATURES = ["reflect", "compile_node_refs", "bp_read_seconds", "catalog", "game_test_until"]
+ 
+ STR, NUM = ({"type": "string"}, {"type": "number"})
+ STR_LIST = {"type": "array", "items": STR}
+diff --git a/editor/bpkit/gametest.py b/editor/bpkit/gametest.py
+index f894d1c..fa343b6 100644
+--- a/editor/bpkit/gametest.py
++++ b/editor/bpkit/gametest.py
+@@ -2,6 +2,10 @@
+ so a harness Blueprint (SpawnAny / MakeAny, built by the host in the mod's _McpTest folder) does it.
+ 
+ Each step records {i, op, ok, value} to <run>/progress.jsonl as soon as it finishes, so a killed run keeps its progress.
++
++until (abfc feature game_test_until): {"op": "until", "probe": <a call, get or python step>, <an assert check>, "timeout": s,
++"every": s} runs the probe every `every` seconds until the check holds; it fails with the last value after `timeout` seconds.
++Asserts also take "below": n and "above": n.
+ """
+ import json
+ import os
+@@ -30,11 +34,35 @@ def _class_path(p):
+     return p if "." in last else "%s.%s_C" % (p, last)
+ 
+ 
++CHECKS = ("equals", "approx", "contains", "truthy", "not_none", "below", "above")
++PROBE_OPS = ("call", "get", "python")
++
++
++def check(step, v):
++    """True when value v passes the assert keys of step (an assert or an until step)."""
++    if "equals" in step:
++        return v == step["equals"]
++    if "approx" in step:
++        return abs(float(v) - float(step["approx"])) <= float(step.get("tolerance", 0.01))
++    if "contains" in step:
++        return step["contains"] in (v if isinstance(v, (str, list, tuple)) else str(v))
++    if "truthy" in step:
++        return bool(v) == bool(step["truthy"])
++    if "not_none" in step:
++        return (v is not None) == bool(step["not_none"])
++    if "below" in step:
++        return v is not None and float(v) < float(step["below"])
++    if "above" in step:
++        return v is not None and float(v) > float(step["above"])
++    raise ValueError("assert needs equals, approx, contains, truthy, not_none, below or above")
++
++
+ def game_test(job):
+     run, mod = job["run"], job["mod"]
+     map_path = job.get("map") or "/Game/Maps/Empty"
+     needle = map_path[len("/Game/"):] if map_path.startswith("/Game/") else map_path.rsplit("/", 1)[-1]
+     t0 = time.time()
++    load_timeout = float(job.get("load_timeout") or 120)     # a big map (Facility) can take longer than the empty one
+     level = None
+     while level is None:
+         for a in unreal.ObjectIterator(unreal.Actor):
+@@ -43,8 +71,8 @@ def game_test(job):
+                 level = a.get_outer()
+                 break
+         if level is None:
+-            if time.time() - t0 > 120:
+-                raise RuntimeError("map %s did not load within 120 s" % map_path)
++            if time.time() - t0 > load_timeout:
++                raise RuntimeError("map %s did not load within %d s" % (map_path, load_timeout))
+             yield 0.5
+     ctx = {}
+     state = {"harness": None}
+@@ -73,6 +101,25 @@ def game_test(job):
+     def get_class(step):
+         return must(unreal.load_class(None, _class_path(step["class"])), "class " + step["class"])
+ 
++    def probe(step):
++        """A call, get or python step: returns its value (no waiting, so until can repeat it)."""
++        op = step.get("op")
++        if op == "call":
++            target = resolve(step["target"])
++            args = [resolve(a) for a in step.get("args") or []]
++            fn = step["function"]
++            snake = _snake(fn)
++            if hasattr(target, snake):
++                return getattr(target, snake)(*args)
++            return target.call_method(fn, tuple(args)) if args else target.call_method(fn)
++        if op == "get":
++            return resolve(step["target"]).get_editor_property(step["property"])
++        if op == "python":
++            scope = {"unreal": unreal, "ctx": ctx, "level": level}
++            exec(compile(step["code"], "<game_test python>", "exec"), scope)
++            return scope.get("result")
++        raise ValueError("unknown probe op %r" % op)
++
+     results = []
+     for i, step in enumerate(job.get("steps") or []):
+         op = step.get("op")
+@@ -89,17 +136,30 @@ def game_test(job):
+                 must(value, "created widget")
+                 if step.get("viewport"):
+                     value.add_to_viewport()
+-            elif op == "call":
+-                target = resolve(step["target"])
+-                args = [resolve(a) for a in step.get("args") or []]
+-                fn = step["function"]
+-                snake = _snake(fn)
+-                if hasattr(target, snake):
+-                    value = getattr(target, snake)(*args)
+-                else:
+-                    value = target.call_method(fn, tuple(args)) if args else target.call_method(fn)
+-            elif op == "get":
+-                value = resolve(step["target"]).get_editor_property(step["property"])
++            elif op in PROBE_OPS:
++                value = probe(step)
++            elif op == "until":
++                inner = step.get("probe") or {}
++                if inner.get("op") not in PROBE_OPS:
++                    raise ValueError("an until probe is a call, get or python step")
++                if not any(k in step for k in CHECKS):
++                    raise ValueError("until needs equals, approx, contains, truthy, not_none, below or above")
++                deadline = time.time() + float(step.get("timeout", 10))
++                every = max(0.05, float(step.get("every", 0.25)))
++                while True:
++                    err = None
++                    try:
++                        value = probe(inner)
++                        if check(step, value):
++                            break
++                    except Exception as e:                       # e.g. a handle not valid yet: look again
++                        err = e
++                    if time.time() >= deadline:
++                        if err is not None:
++                            raise err
++                        rec["ok"] = False
++                        break
++                    yield every
+             elif op == "set":
+                 resolve(step["target"]).set_editor_property(step["property"], resolve(step.get("value")))
+             elif op == "find":
+@@ -120,25 +180,8 @@ def game_test(job):
+             elif op == "wait":
+                 yield float(step.get("seconds", 1.0))
+             elif op == "assert":
+-                v = resolve(step["value"])
+-                value = v
+-                if "equals" in step:
+-                    ok = v == step["equals"]
+-                elif "approx" in step:
+-                    ok = abs(float(v) - float(step["approx"])) <= float(step.get("tolerance", 0.01))
+-                elif "contains" in step:
+-                    ok = step["contains"] in (v if isinstance(v, (str, list, tuple)) else str(v))
+-                elif "truthy" in step:
+-                    ok = bool(v) == bool(step["truthy"])
+-                elif "not_none" in step:
+-                    ok = (v is not None) == bool(step["not_none"])
+-                else:
+-                    raise ValueError("assert needs equals, approx, contains, truthy or not_none")
+-                rec["ok"] = bool(ok)
+-            elif op == "python":
+-                scope = {"unreal": unreal, "ctx": ctx, "level": level}
+-                exec(compile(step["code"], "<game_test python>", "exec"), scope)
+-                value = scope.get("result")
++                value = resolve(step["value"])
++                rec["ok"] = bool(check(step, value))
+             else:
+                 raise ValueError("unknown step op %r" % op)
+             if step.get("as"):
+diff --git a/headless_tools.py b/headless_tools.py
+index 6a689ee..8b7ed7b 100644
+--- a/headless_tools.py
++++ b/headless_tools.py
+@@ -673,8 +673,10 @@ def build(run_json, remote_errors, t3d_errors, kit_root, forbidden, py_status, l
+         map_path = args.get("map") or "/Game/Maps/Empty"
+         if not valid_map(mod, map_path):
+             return _out({"error": "map must look like /Game/Maps/Empty or /%s/Maps/Name (letters, digits, _ and /)" % mod})
+-        res = headless.run_game(stage, {"op": "game_test", "steps": steps, "map": map_path}, map_path=map_path,
+-                                timeout=float(args.get("timeout_seconds") or 180))
++        timeout = float(args.get("timeout_seconds") or 180)
++        # the map may take most of the run to load (Facility); the steps get at least the last 30 s
++        res = headless.run_game(stage, {"op": "game_test", "steps": steps, "map": map_path, "load_timeout": max(120.0, timeout - 30)},
++                                map_path=map_path, timeout=timeout)
+         run = Path(res["run"])
+         result = res.get("result") or {}
+         step_results = result.get("steps")
+@@ -801,7 +803,9 @@ def build(run_json, remote_errors, t3d_errors, kit_root, forbidden, py_status, l
+          "Each message gets the node (graph, node, from the compiled export) when the compiler stored it on one; node_refs=false skips that export.",
+          dict(mod=STR, asset_paths={"type": "array", "items": STR}, node_refs=BOOL, timeout_seconds=NUM), ["mod"]),
+         ("bp_game_test", t_bp_game_test,
+-         "Run steps in a hidden game (-game -nullrhi, /Game/Maps/Empty by default): new/spawn/widget, call, get, set, find, wait, assert, python. "
++         "Run steps in a hidden game (-game -nullrhi, /Game/Maps/Empty by default): new/spawn/widget, call, get, set, find, wait, assert, python, "
++         "until (repeat a call/get/python probe until an assert check holds, or fail after timeout). Asserts: equals, approx, contains, "
++         "truthy, not_none, below, above. "
+          "Limits: cannot test anything injected into W_PlayerHUD_Main (no live HUD hidden); Python cannot spawn actors or create widgets in -game, "
+          "so a harness Blueprint is built in the staged mod (Content/_McpTest, never published); PrintString is not logged in this build, "
+          "so read state back with get steps and asserts.",
+diff --git a/tests/test_unit.py b/tests/test_unit.py
+index 35d1771..4f696f2 100644
+--- a/tests/test_unit.py
++++ b/tests/test_unit.py
+@@ -2441,6 +2441,94 @@ class ReadbackTests(unittest.TestCase):
+         self.assertFalse(out["items"][1]["inherited"])
+ 
+ 
++class GameTestUntilTests(unittest.TestCase):
++    """bpkit.gametest with a stubbed `unreal` and a fake clock: until polls a probe, asserts take below/above."""
++
++    @classmethod
++    def setUpClass(cls):
++        cls.fake = types.ModuleType("unreal")
++
++        class Object:
++            pass
++
++        class Actor(Object):
++            def __init__(self, name, outer=None):
++                self.name, self.outer = name, outer
++
++            def __str__(self):
++                return "<Object '/Game/Maps/Empty.Empty:PersistentLevel.%s'>" % self.name
++
++            def get_outer(self):
++                return self.outer
++
++        cls.fake.Object, cls.fake.Actor = Object, Actor
++        cls.fake.level_actor = Actor("WorldSettings", outer="LEVEL")
++        cls.fake.ObjectIterator = lambda base: [cls.fake.level_actor]
++        cls.patch = mock.patch.dict(sys.modules, {"unreal": cls.fake})
++        cls.patch.start()
++        for n in ("core", "gametest"):
++            sys.modules.pop("bpkit." + n, None)
++        cls.gt = importlib.import_module("bpkit.gametest")
++
++    @classmethod
++    def tearDownClass(cls):
++        cls.patch.stop()
++        for n in ("core", "gametest"):
++            sys.modules.pop("bpkit." + n, None)
++
++    def run_steps(self, steps):
++        run = tempfile.mkdtemp(prefix="gt", dir=_TMP)
++        clock = [1000.0]
++        with mock.patch.object(self.gt.time, "time", lambda: clock[0]):
++            g = self.gt.game_test({"run": run, "mod": "M", "steps": steps})
++            try:
++                while True:
++                    clock[0] += float(next(g))
++            except StopIteration as e:
++                return e.value, clock[0] - 1000.0
++
++    def test_until_polls_until_the_check_holds(self):
++        count = "ctx['n'] = ctx.get('n', 0) + 1\nresult = ctx['n']"
++        res, waited = self.run_steps([{"op": "until", "probe": {"op": "python", "code": count}, "above": 3, "timeout": 10, "every": 0.5}])
++        self.assertEqual(res["steps"][0], {"i": 0, "op": "until", "ok": True, "value": 4})
++        self.assertAlmostEqual(waited, 1.5)
++
++    def test_until_fails_with_the_last_value_after_the_timeout(self):
++        res, waited = self.run_steps([{"op": "until", "probe": {"op": "python", "code": "result = 7"}, "equals": 9, "timeout": 2, "every": 0.5}])
++        self.assertEqual(res["steps"][0], {"i": 0, "op": "until", "ok": False, "value": 7})
++        self.assertEqual(res["failed"], 1)
++        self.assertAlmostEqual(waited, 2.0)
++
++    def test_until_retries_a_probe_that_raises_and_reports_its_error_at_the_end(self):
++        res, _ = self.run_steps([{"op": "until", "probe": {"op": "get", "target": "$nothing", "property": "Step"}, "equals": 1, "timeout": 1}])
++        self.assertFalse(res["steps"][0]["ok"])
++        self.assertIn("KeyError", res["steps"][0]["error"])
++
++    def test_until_refuses_a_bad_probe_or_no_check(self):
++        res, _ = self.run_steps([{"op": "until", "probe": {"op": "wait", "seconds": 1}, "equals": 1},
++                                 {"op": "until", "probe": {"op": "python", "code": "result = 1"}}])
++        self.assertEqual([r["ok"] for r in res["steps"]], [False, False])
++        self.assertIn("call, get or python", res["steps"][0]["error"])
++
++    def test_assert_below_and_above(self):
++        res, _ = self.run_steps([{"op": "python", "code": "result = 5.0", "as": "d"},
++                                 {"op": "assert", "value": "$d", "below": 6}, {"op": "assert", "value": "$d", "below": 5},
++                                 {"op": "assert", "value": "$d", "above": 4}, {"op": "assert", "value": "$d", "above": 5}])
++        self.assertEqual([r["ok"] for r in res["steps"]], [True, True, False, True, False])
++
++    def test_the_map_wait_uses_load_timeout(self):
++        run = tempfile.mkdtemp(prefix="gt", dir=_TMP)
++        clock = [0.0]
++        with mock.patch.object(self.gt.time, "time", lambda: clock[0]), \
++                mock.patch.object(self.fake, "ObjectIterator", lambda base: []):
++            g = self.gt.game_test({"run": run, "mod": "M", "map": "/Game/Maps/Facility", "load_timeout": 300, "steps": []})
++            with self.assertRaises(RuntimeError) as cm:
++                while True:
++                    clock[0] += float(next(g))
++        self.assertIn("within 300 s", str(cm.exception))
++        self.assertGreater(clock[0], 300)
++
++
+ class SelfEventCallTests(unittest.TestCase):
+     """bpkit.graphs / bpkit.apply with a stubbed `unreal`: a self call to a custom event the same spec adds."""
+     MODS = ("core", "assets", "graphs", "apply")

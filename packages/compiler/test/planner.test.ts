@@ -130,6 +130,26 @@ test("pendingAdoption plans the unit with the adopted nodes removed; the origin 
   assert.deepEqual(r.plan.assets[0]!.graphNodes["EventGraph"]!.map((n) => n.name).sort(), ["CALL_1", "CE_1", "OTHER_1"]);
 });
 
+test("a temp of a re-planned unit whose variable has another type in the asset is removed and declared again", () => {
+  const t0 = ir.assets[0]!.variables.find((v) => v.name === "abfc_UpdateTarget_t0")!;
+  const other = t0.type === "array:string" ? "double" : "array:string";
+  const plan = (onStage: string) =>
+    planBuild(ir, {
+      manifests: new Map(),
+      snapshots: new Map([[asset, snapshotOf()]]),
+      stage,
+      handMadeUnits: new Map(),
+      snapshotVariables: new Map([[asset, ["abfc_UpdateTarget_t0"]]]),
+      snapshotVariableTypes: new Map([[asset, new Map([["abfc_UpdateTarget_t0", onStage]])]]),
+    }).plan.assets[0]!;
+  const shifted = plan(other); // a new temp earlier in the unit shifted the numbering
+  assert.deepEqual(shifted.removeVariables, ["abfc_UpdateTarget_t0"]);
+  assert.ok(shifted.variables.some((v) => v.name === "abfc_UpdateTarget_t0" && v.type === t0.type));
+  const same = plan(t0.type);
+  assert.equal(same.removeVariables, undefined);
+  assert.equal(same.variables.some((v) => v.name === "abfc_UpdateTarget_t0"), false, "an up-to-date temp is not declared again");
+});
+
 test("a changed adopted hand-made unit is replaced (TS wins): ABFC5014 names ABFC5004", () => {
   const entry = node("CE_1", EVENT, [`CustomFunctionName="UpdateTarget"`]);
   const snapshot = snapshotOf(entry);
@@ -635,6 +655,22 @@ test("a retyped own field is removed and re-added with the new type (ABFC2047 wa
   assert.ok(lacking.plan.assets[0]!.variables.some((v) => v.name === "Score" && v.type === "float"));
 });
 
+test("a double field the asset reads back as real is not recreated (real and double are one type)", () => {
+  const snapshot = snapshotOf(node("N1", CALL, []));
+  const keep = mu({ irHash: unit.hash, nodes: ["N1"], assetHash: unitStateHash(snapshot, ["N1"]), stageSyncedAt: "T1" });
+  const manifest = { ...manifestOf(keep), variables: [{ name: "Cum", type: "array:double" }] } as unknown as Manifest;
+  const r = planBuild(withFields(["Cum", "array:double"]), {
+    manifests: new Map([[asset, manifest]]),
+    snapshots: new Map([[asset, snapshot]]),
+    stage,
+    handMadeUnits: new Map(),
+    snapshotVariables: new Map([[asset, ["Cum", "abfc_UpdateTarget_t0", "abfc_UpdateTarget_i0"]]]),
+    snapshotVariableTypes: new Map([[asset, new Map([["Cum", "array:real"]])]]),
+  });
+  assert.deepEqual(r.diagnostics, []);
+  assert.deepEqual(r.plan.assets, [], "nothing to do: the variable already has the type");
+});
+
 test("an own field removed from the TS is removed from the asset (ABFC5011 warning); one the asset lacks is only forgotten", () => {
   const r = fieldPlan(ir, fieldManifest(["Gone", "int"]), ["Gone"]);
   assert.deepEqual(r.diagnostics.map((d) => [d.code, d.severity]), [["ABFC5011", "warning"]]);
@@ -688,7 +724,7 @@ test("an asset whose only news is a field is still planned, with no units", () =
 test("a changed or removed own field default of a variable in the asset is planned as variableDefaults; equal defaults plan nothing", () => {
   const snapshot = snapshotOf(node("N1", CALL, []));
   const keep = mu({ irHash: unit.hash, nodes: ["N1"], assetHash: unitStateHash(snapshot, ["N1"]), stageSyncedAt: "T1" });
-  const manifest = { ...manifestOf(keep), variables: [{ name: "Speed", type: "float", hash: "h", default: "2.5" }] } as Manifest;
+  const manifest = { ...manifestOf(keep), variables: [{ name: "Speed", type: "float", hash: "h", default: "2.5" }], variablesStageSyncedAt: stage.syncedAt } as Manifest;
   const withDefault = (def?: string): IrModule => {
     const a = ir.assets[0]!;
     const v = { name: "Speed", type: "float", ...(def !== undefined ? { default: def } : {}), flags: [], origin: span0 };
@@ -724,6 +760,36 @@ test("a changed or removed own field default of a variable in the asset is plann
   assert.deepEqual(old.diagnostics.map((d) => [d.code, d.severity]), [["ABFC2084", "warning"]]);
   assert.match(old.diagnostics[0]!.message, /cannot change the default of the existing variable Speed/);
   assert.deepEqual(old.plan.assets, []);
+});
+
+test("own field defaults are sent again after a re-sync that discarded them (not published), or a Mod Editor save; not when published", () => {
+  const snapshot = snapshotOf(node("N1", CALL, []));
+  const keep = mu({ irHash: unit.hash, nodes: ["N1"], assetHash: unitStateHash(snapshot, ["N1"]), stageSyncedAt: stage.syncedAt });
+  const a = ir.assets[0]!;
+  const irm = { ...ir, assets: [{ ...a, variables: [{ name: "Speed", type: "float", default: "4", flags: [], origin: span0 }, { name: "Plain", type: "int", flags: [], origin: span0 }, ...a.variables] }] } as unknown as IrModule;
+  const vars = [{ name: "Speed", type: "float", hash: "h", default: "4" }, { name: "Plain", type: "int", hash: "h2" }];
+  const run = (extra: Partial<Manifest>, editedInMod?: Set<string>) => {
+    const manifest = { ...manifestOf(keep), variables: vars, ...extra } as Manifest;
+    const input = { manifests: new Map([[asset, manifest]]), stage, ...(editedInMod !== undefined ? { editedInMod } : {}) };
+    return {
+      read: assetsNeedingRead(irm, input).has(asset),
+      plan: planBuild(irm, { ...input, snapshots: new Map([[asset, snapshot]]), handMadeUnits: new Map(), snapshotVariables: new Map([[asset, ["Speed", "Plain", "abfc_UpdateTarget_t0", "abfc_UpdateTarget_i0"]]]) }),
+    };
+  };
+  const stale = run({ variablesStageSyncedAt: "an older sync" });
+  assert.equal(stale.read, true);
+  assert.deepEqual(stale.plan.plan.assets[0]!.variableDefaults, { Speed: "4" }, "only fields with a default are sent");
+  assert.equal(stale.plan.plan.assets[0]!.variablesResynced, true);
+  const legacy = run({});
+  assert.deepEqual(legacy.plan.plan.assets[0]!.variableDefaults, { Speed: "4" }, "a manifest that never recorded the sync sends them once");
+  const published = run({ variablesStageSyncedAt: "an older sync", variablesPublished: true });
+  assert.equal(published.read, false);
+  assert.deepEqual(published.plan.plan.assets, []);
+  const current = run({ variablesStageSyncedAt: stage.syncedAt });
+  assert.equal(current.read, false);
+  assert.deepEqual(current.plan.plan.assets, []);
+  const saved = run({ variablesStageSyncedAt: stage.syncedAt, variablesPublished: true }, new Set([asset.toLowerCase()]));
+  assert.deepEqual(saved.plan.plan.assets[0]!.variableDefaults, { Speed: "4" }, "the Mod Editor saved it: TypeScript wins");
 });
 
 test("a new own field with a default carries it in the variable spec", () => {

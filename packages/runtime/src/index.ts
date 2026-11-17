@@ -4,7 +4,8 @@
 export type int = number & { readonly __bpNumber?: "int" };
 export type int64 = number & { readonly __bpNumber?: "int64" };
 export type byte = number & { readonly __bpNumber?: "byte" };
-export type float = number & { readonly __bpNumber?: "float" };
+/** A float pin also takes a double: the editor converts real to float on the pin, as when wiring it by hand. */
+export type float = number & { readonly __bpNumber?: "float" | "double" };
 export type double = number & { readonly __bpNumber?: "double" };
 
 export type name = string & { readonly __bpString?: "name" };
@@ -15,7 +16,8 @@ export type name = string & { readonly __bpString?: "name" };
  */
 export type text = string & { readonly __bpString?: "text" };
 
-export type TSubclassOf<T> = { readonly __bpClassOf?: T };
+/** A class reference. A field of this type may be initialized with the class itself (`Pot: TSubclassOf<BP_Pot_C> = BP_Pot_C`). */
+export type TSubclassOf<T> = { readonly __bpClassOf?: T } | (abstract new (...a: never[]) => T);
 export type TSoftObjectPtr<T> = { readonly __bpSoftObjectOf?: T };
 export type TSoftClassPtr<T> = { readonly __bpSoftClassOf?: T };
 
@@ -37,6 +39,8 @@ export type DelegateRef = { readonly __bpDelegate?: true } | ((...a: any[]) => v
 export interface SpawnOptions {
   owner?: object | null;
   instigator?: object | null;
+  /** Where the actor spawns (a Transform, e.g. `KismetMathLibrary.MakeTransform(loc, rot, scale)`); default: the world origin. */
+  transform?: object;
   collisionHandlingOverride?: EnumText<"/Script/Engine.ESpawnActorCollisionHandlingMethod">;
   transformScaleMethod?: EnumText<"/Script/Engine.ESpawnActorScaleMethod">;
 }
@@ -54,8 +58,14 @@ export interface BlueprintOptions {
   netUpdateFrequency?: number;
   minNetUpdateFrequency?: number;
   tickInterval?: number;
-  /** Not supported yet (ABFC2063): writing the saved bStartWithTickEnabled is unverified. */
+  /** Start with tick enabled (PrimaryActorTick.bStartWithTickEnabled); an Actor only. Written by the class-defaults pass. */
   tickEnabled?: boolean;
+  /**
+   * Blueprint interfaces the class implements (`interfaces: [I_Interactable_C]`), added to the asset by the backend. Their events are
+   * implemented with `@override` like a parent's (`@override InteractWith_A(...)`, no TS `override` keyword since TypeScript does not
+   * see the interface as a base class); an interface function with outputs becomes a function graph.
+   */
+  interfaces?: ReadonlyArray<abstract new (...a: never[]) => unknown>;
   /** row asset path, verified (Phase 2) @deprecated Use `@director("RowName")`. */
   classManagerRow?: string;
   /** The asset is a Widget Blueprint; the class must extend a UserWidget. The designer layout (WidgetTree) stays hand-made; designer widgets are read-only members of the `_Manual` stub. */
@@ -92,6 +102,40 @@ export declare function event(m: (this: any, ...a: any[]) => void, ctx: ClassMet
 export declare function override(m: (this: any, ...a: any[]) => void, ctx: ClassMethodDecoratorContext): void;
 export declare function createWidget<T>(cls: abstract new (...a: never[]) => T, owningPlayer: object | null): T;
 export declare function spawnActor<T>(cls: abstract new (...a: never[]) => T, opts?: SpawnOptions): T;
+export interface ComponentOptions {
+  /** Name of the component this one is attached to (another component field, or a component of the parent class). Default: the root. */
+  attachTo?: string;
+}
+/**
+ * A component of an Actor class, as a field initializer: `Mesh = component(StaticMeshComponent, { StaticMesh: asset(StaticMesh, "@mod/SM_Crate"),
+ * RelativeLocation: { X: 0, Y: 0, Z: 50 } }, { attachTo: "Root" })`. The backend adds it to the Blueprint's components and sets
+ * the properties on its template (values as for a field default: literals, asset(...), a class, native struct literals, arrays).
+ * The field reads the component (`this.Mesh.SetVisibility(...)`); it cannot be assigned.
+ */
+export declare function component<T>(cls: abstract new (...a: never[]) => T, props?: { [K in keyof T]?: T[K] }, opts?: ComponentOptions): T;
+/**
+ * Calls an interface function on any object (Blueprint interface "Message" node): `message(actor, I_Interactable_C).InteractWith_A(me, null)`.
+ * Nothing happens (and outputs are defaults) when the object does not implement the interface; no cast is needed. Only as the
+ * target of a call of one of the interface's functions.
+ */
+export declare function message<T>(target: object | null, iface: abstract new (...a: never[]) => T): T;
+/**
+ * A hard reference to an existing asset (mesh, material, sound, data asset): `asset(StaticMesh, "@mod/Meshes/SM_Crate")` or
+ * `asset(SoundBase, "/Game/Audio/S_Beep")`. Only as an argument of a call: it becomes that pin's default object, so the
+ * asset cooks with the Blueprint and needs no load node. The path is a string literal; `@mod/` means the mod being built.
+ */
+/**
+ * The world subsystem of class `cls` (Blueprint "Get <Subsystem>", K2Node_GetSubsystem): `getWorldSubsystem(WorldFlagSubsystem)`.
+ * A pure node with no exec pins; call the subsystem's own functions on the result (`sub.HasWorldFlag(...)`). The class must be a
+ * native WorldSubsystem (a `/Script/...` class with stubs).
+ */
+export declare function getWorldSubsystem<T>(cls: abstract new (...a: never[]) => T): T;
+export declare function asset<T>(cls: abstract new (...a: never[]) => T, path: string): T;
+/**
+ * Binds `target`'s function or event `fn` to `source`'s event dispatcher (Bind Event to <Dispatcher>): Add Delegate plus
+ * Create Event. Both names are string literals; the function's signature must match the dispatcher's. A statement only.
+ */
+export declare function bindEvent(source: object, dispatcher: string, target: object, fn: string): void;
 export declare function nameOf(text: string): name;
 export declare function cast<T>(value: object | null | undefined, cls: abstract new (...a: never[]) => T): T | null;
 export declare function isValid<T>(value: T | null | undefined): value is T;

@@ -1,4 +1,5 @@
-import { mkdirSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { win32 } from "node:path";
 import type { Backend, ReflectData } from "@abfc/backend";
@@ -40,8 +41,9 @@ import { reflectAll } from "../reflectchunks.js";
 import { recordRun } from "../runs.js";
 import { backendIdOf, resolveStubRequest, shortName, stubsNeedWork, usedPlaceholdersToGenerate } from "../stubsauto.js";
 import type { StubMode } from "../stubsauto.js";
+import { stagePackageHash } from "../readcache.js";
 import { refreshTagsFile } from "../tags.js";
-import { BackendSession, Recorder, backendStartOptions, pruneManifestsToStage, since } from "./common.js";
+import { BackendSession, Recorder, backendStartOptions, missSummary, pruneManifestsToStage, readCacheFor, readCacheOf, since, useReadCache } from "./common.js";
 import { ensureStage } from "./stage.js";
 
 /** Folders of the mod's Content that are never stubbed. */
@@ -53,7 +55,20 @@ const MAX_REFLECT_ROUNDS = 6;
 /** The backend's refusal to read an asset of another class (`<asset> is not a Blueprint (<Class>)`, `<asset> is a <Class>, not a Blueprint`). */
 const NOT_A_BLUEPRINT = /not a Blueprint/i;
 
-/** Every `*.uasset` below `<modDir>\Content`, as `/<mod>/<path without extension>`. */
+/**
+ * False only for a package that certainly holds no Blueprint: its name table lacks `BlueprintGeneratedClass` (which also
+ * matches Widget and Anim Blueprints). Meshes, textures, materials and sounds are most of a mod, and each one read through
+ * the backend costs a headless export (15-18 s), so they are skipped before the read. Unreadable files are kept.
+ */
+function mayBeBlueprint(host: CliContext["deps"]["host"], file: string): boolean {
+  try {
+    return host.readFile(file).includes("BlueprintGeneratedClass");
+  } catch {
+    return true;
+  }
+}
+
+/** Every `*.uasset` below `<modDir>\Content` that may be a Blueprint, as `/<mod>/<path without extension>`. */
 function listModAssets(ctx: CliContext, modDir: string): string[] {
   const host = ctx.deps.host;
   const out: string[] = [];
@@ -61,6 +76,7 @@ function listModAssets(ctx: CliContext, modDir: string): string[] {
     for (const name of host.readDir(dir)) {
       if (SKIPPED_FOLDERS.includes(name)) continue;
       if (name.toLowerCase().endsWith(".uasset")) {
+        if (!mayBeBlueprint(host, win32.join(dir, name))) continue;
         out.push(`/${ctx.config.mod.name}/${rel}${name.slice(0, -".uasset".length)}`);
       } else if (!name.includes(".")) {
         walk(win32.join(dir, name), `${rel}${name}/`);
@@ -97,6 +113,39 @@ function merge(into: ReflectData, add: ReflectData): void {
   into.errors.push(...add.errors);
 }
 
+/**
+ * `_modreads.json` in the profile folder: for each mod asset of the stub cache, the hash of its stage files and of what abfc owns
+ * in it when it was last read. `abfc generate` reads again only the assets whose entry differs (a new asset, a Mod Editor save,
+ * a build that changed what abfc owns); the rest keep their entry of the stub cache.
+ */
+const MOD_READS_FILE = "_modreads.json";
+const MOD_READS_VERSION = 1;
+interface ModReads {
+  version: number;
+  /** The stub cache the entries belong to: generator and editor build. */
+  identity: string;
+  /** `shallow`: the entry's stub was made class-only (`stubs.classOnly`), so it is read again once the asset leaves that list. */
+  assets: Record<string, { files: string; owned: string; skipped?: true; shallow?: true }>;
+}
+
+function readModReads(profileDir: string, identity: string): ModReads["assets"] {
+  try {
+    const r = JSON.parse(readFileSync(win32.join(profileDir, MOD_READS_FILE), "utf8")) as ModReads;
+    if (r.version === MOD_READS_VERSION && r.identity === identity && typeof r.assets === "object" && r.assets !== null) return r.assets;
+  } catch {
+    // missing or damaged: every asset is read
+  }
+  return {};
+}
+
+/** The stub of a `stubs.classOnly` asset: its class and parent, no own members (those of the parent come from the parent's stub). */
+function classOnlyStub(m: ManualAsset): ManualAsset {
+  return { ...m, variables: [], widgets: [], functions: [], events: [], ...(m.components !== undefined ? { components: [] } : {}) };
+}
+
+const ownedHash = (o: { units: string[]; variables: string[] } | undefined): string =>
+  createHash("sha256").update(JSON.stringify(o ?? { units: [], variables: [] })).digest("hex");
+
 /** What one `abfc generate` run reflects and writes (decided by {@link generateStubs}). */
 interface StubRun {
   mode: StubMode;
@@ -106,6 +155,10 @@ interface StubRun {
   seed: StubCache | null;
   /** Read the mod's own assets (explicit runs and runs without a cache); otherwise they come from the seed. */
   readModAssets: boolean;
+  /** Read every mod asset, even one whose stage files are unchanged since its entry in the seed was made (`--full`). */
+  readAllModAssets: boolean;
+  /** The staging copy (empty when unknown: every asset is read). */
+  stagingPath: string;
   classes: string[];
   structs: string[];
   /** The /Game entries of `classes`. */
@@ -154,27 +207,99 @@ async function reflectAndRead(ctx: CliContext, backend: Backend, run: StubRun): 
   // Mod assets first, so their struct references join the reflect closure.
   const modAssetsCfg = config.stubs.modAssets;
   const modDir = env.modDir.value;
-  const assetList = modAssetsCfg === "all" ? (modDir === null ? [] : listModAssets(ctx, modDir)) : modAssetsCfg;
+  const classOnly = new Set((config.stubs.classOnly ?? []).map((a) => a.toLowerCase()));
+  const listed = modAssetsCfg === "all" ? (modDir === null ? [] : listModAssets(ctx, modDir)) : modAssetsCfg;
+  const assetList = [...listed, ...(config.stubs.classOnly ?? []).filter((a) => !listed.some((l) => l.toLowerCase() === a.toLowerCase()))];
   const manual: ManualAsset[] = [];
   const owned = ownedSets(ctx.projectDir);
+  // A class-only stub drops the asset's own members: an asset abfc builds into (its TS uses its components) needs them.
+  for (const asset of config.stubs.classOnly ?? []) {
+    const o = Object.entries(owned).find(([a]) => a.toLowerCase() === asset.toLowerCase())?.[1];
+    if (o !== undefined && o.units.length + o.variables.length > 0) {
+      output.diag({
+        severity: "warning",
+        code: "ABFC3016",
+        message: `${asset} is in stubs.classOnly but abfc builds into it (${o.units.length} unit(s), ${o.variables.length} variable(s)); its stub has no own members, so TypeScript that uses one fails ABFC2060. Move it to stubs.modAssets.`,
+      });
+    }
+  }
   const t0 = clock();
+  const readsIdentity = `${STUBGEN_VERSION}|${env.fingerprint ?? ""}`;
+  const profileDirForReads = win32.join(paths.stubsDir, env.profile.id);
+  const priorReads = run.seed === null || run.readAllModAssets ? {} : readModReads(profileDirForReads, readsIdentity);
+  const reads: ModReads["assets"] = {};
+  let unchanged = 0;
+  /** Why each mod asset that was read went to the editor (shown after the reads, so a slow run says what changed). */
+  const readWhy = new Map<string, number>();
   if (!run.readModAssets) {
     manual.push(...run.seed!.manual);
   } else if (assetList.length > 0) {
     let skipped = 0;
+    const seedManual = new Map((run.seed?.manual ?? []).map((m) => [m.asset, m]));
     await ctx.progress.run(
       "Reading mod assets",
       async (s) => {
         for (const [i, asset] of assetList.entries()) {
+          // An asset whose stage files and owned set are what they were at its last read keeps its entry (no editor read).
+          const files = run.stagingPath === "" ? null : stagePackageHash(run.stagingPath, mod, asset);
+          const own = ownedHash(owned[asset]);
+          const prior = priorReads[asset];
+          // A class-only asset keeps the stub of its first read whatever its files do now (only its class and parent are used).
+          const shallow = classOnly.has(asset.toLowerCase());
+          if (shallow && !run.readAllModAssets) {
+            const kept = seedManual.get(asset);
+            if (kept !== undefined || prior?.skipped === true) {
+              if (kept !== undefined) manual.push(classOnlyStub(kept));
+              else skipped++;
+              if (prior !== undefined) reads[asset] = { ...prior, shallow: true };
+              else if (files !== null) reads[asset] = { files, owned: own, shallow: true };
+              unchanged++;
+              s.tick(i + 1, assetList.length);
+              continue;
+            }
+          }
+          if (files !== null && prior !== undefined && prior.files === files && prior.owned === own && (shallow || prior.shallow !== true)) {
+            const kept = seedManual.get(asset);
+            if (prior.skipped === true || kept !== undefined) {
+              if (kept !== undefined && prior.skipped !== true) manual.push(kept);
+              else skipped++;
+              reads[asset] = prior;
+              unchanged++;
+              s.tick(i + 1, assetList.length);
+              continue;
+            }
+          }
+          const why =
+            prior === undefined
+              ? run.readAllModAssets
+                ? "--full"
+                : run.seed === null
+                  ? "stub cache rebuilt"
+                  : "not read before"
+              : prior.shallow === true && !shallow
+                ? "moved out of stubs.classOnly"
+                : files === null
+                  ? "no stage file"
+                  : prior.files !== files
+                    ? "files changed"
+                    : prior.owned !== own
+                      ? "owned part changed"
+                      : "no stub kept";
+          readWhy.set(why, (readWhy.get(why) ?? 0) + 1);
           try {
             const snap = await backend.read(mod, asset);
             const text = deps.host.readFile(snap.exportPath);
-            manual.push(manualFromExport(asset, text, snap.structure, owned[asset] ?? { units: [], variables: [] }));
+            const made = manualFromExport(asset, text, snap.structure, owned[asset] ?? { units: [], variables: [] });
+            manual.push(shallow ? classOnlyStub(made) : made);
+            if (files !== null) reads[asset] = { files, owned: own, ...(shallow ? { shallow: true as const } : {}) };
           } catch (e) {
             if (e instanceof AbfcError && e.diagnostic.code !== "ABFC4002" && e.diagnostic.code !== "ABFC4100") throw e;
             skipped++;
             // The mod also holds assets that are not Blueprints (mod config, class-manager rows, structs, metadata): the backend says so, and they have no stub to make.
-            if (e instanceof AbfcError && e.diagnostic.code === "ABFC4002" && NOT_A_BLUEPRINT.test(e.diagnostic.message)) continue;
+            if (e instanceof AbfcError && e.diagnostic.code === "ABFC4002" && NOT_A_BLUEPRINT.test(e.diagnostic.message)) {
+              if (files !== null) reads[asset] = { files, owned: own, skipped: true };
+              continue;
+            }
             output.diag({
               severity: "warning",
               code: "ABFC4002",
@@ -188,7 +313,8 @@ async function reflectAndRead(ctx: CliContext, backend: Backend, run: StubRun): 
       {
         total: assetList.length,
         slowHint: SLOW_BACKEND_HINT,
-        done: () => `Read ${manual.length} mod asset(s)${skipped > 0 ? `, ${skipped} skipped` : ""}`,
+        done: () =>
+          `Read ${manual.length} mod asset(s)${unchanged > 0 ? ` (${unchanged} unchanged since the last generate, not read again)` : ""}${skipped > 0 ? `, ${skipped} skipped` : ""}${readWhy.size > 0 ? `; from the editor: ${[...readWhy].map(([w, n]) => `${n} ${w}`).join(", ")}` : ""}`,
       },
     );
   }
@@ -427,6 +553,11 @@ async function reflectAndRead(ctx: CliContext, backend: Backend, run: StubRun): 
       clearRetired: run.readModAssets,
     });
     if (first !== null && gameTags !== null) writeGameTags(profileDir, gameTags);
+    // after the stub cache that holds the entries: a run that stops earlier leaves the old record, so its assets are read again
+    if (run.readModAssets) {
+      const record: ModReads = { version: MOD_READS_VERSION, identity: readsIdentity, assets: reads };
+      writeFileAtomic(win32.join(profileDir, MOD_READS_FILE), JSON.stringify(record, null, 1) + "\n");
+    }
     mkdirSync(paths.abfcDir, { recursive: true });
     const layout = runtimeLayout();
     writeTsconfigPaths(
@@ -489,12 +620,22 @@ export async function generateStubs(ctx: CliContext, backend: Backend, mode: Stu
       fix: "point ABFC_BACKEND_DIR at a checkout that provides reflect (see docs/backend.md).",
     });
   }
-  const { resynced } = await ensureStage(backend, env, config, {
+  const tStage = clock();
+  const { resynced, status: stageNow } = await ensureStage(backend, env, config, {
     resync: mode === "explicit" ? flags.resync : false,
     warn: (d) => output.diag(d),
     progress: ctx.progress,
   });
-  if (resynced) await pruneManifestsToStage(ctx, backend, mod);
+  // The re-sync's manifest check reads every owned asset: from the read cache when its files are as an earlier read saw them
+  // (it used to read all of them from the editor, about 30 s each, on every `generate --resync`). `--full` reads from the editor.
+  if (!flags.full) useReadCache(ctx, readCacheFor(ctx, info, stageNow.stagingPath));
+  if (resynced) {
+    const before = readCacheOf(ctx)?.missed.length ?? 0;
+    await pruneManifestsToStage(ctx, backend, mod);
+    const why = missSummary(ctx, before);
+    if (why !== "") output.info(`after the re-sync, ${why}`, "dim");
+  }
+  recordRun(paths.runsFile, { at: at(), step: "stubs.stage", seconds: (clock() - tStage) / 1000, ok: true, mode: "cold" });
 
   // The class catalog of this editor build: the file when it is current, else from the backend.
   let catalog: { catalog: Catalog; sha256: string } | null = flags.refresh ? null : readCatalog(profileDir);
@@ -588,6 +729,8 @@ export async function generateStubs(ctx: CliContext, backend: Backend, mode: Stu
     full,
     seed,
     readModAssets: mode === "explicit" || seed === null,
+    readAllModAssets: flags.full,
+    stagingPath: stageNow.stagingPath,
     classes,
     structs,
     castTargets: classes.filter((c) => c.startsWith("/Game/")),

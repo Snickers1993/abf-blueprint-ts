@@ -230,7 +230,8 @@ export interface Backend {
   reflect(r: ReflectRequest): Promise<ReflectResult>;
   /** `catalog` (backend 2.6.0, capability `catalog`): names-only catalog of every game Blueprint class and engine class, struct, enum and function library. */
   catalog(mod: string): Promise<CatalogResult>;
-  gameTest(mod: string, steps: unknown[], o: { timeoutSeconds: number }): Promise<GameTestReport>;
+  /** `map`: the map the game opens (the backend's default empty map when absent). */
+  gameTest(mod: string, steps: unknown[], o: { timeoutSeconds: number; map?: string }): Promise<GameTestReport>;
   audit(mod: string): Promise<AuditReport>;
   /** `bp_publish` for exactly `mod`, only with a {@link PublishGrant} from `grantPublish` (sent only by `abfc publish`). */
   publish(mod: string, assets: string[], grant: PublishGrant, o?: { deleteRemoved?: boolean }): Promise<PublishResult>;

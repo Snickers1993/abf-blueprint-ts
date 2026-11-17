@@ -668,3 +668,39 @@ test("members without a kind keep the plain property form and add nothing to ind
   assert.deepEqual(index.discovered, []);
   assert.doesNotMatch(files.get("Script/FakeEngine.d.ts") ?? "", /@bpComponent/);
 });
+
+test("components a hand-made actor adds itself become readonly @bpComponent members; inherited and native ones do not", async () => {
+  const { manualFromExport, emitManual } = await import("../src/index.js");
+  const bp = "/TestMod/Rooms/BP_Lift";
+  const body = [
+    `Begin Object Class=/Script/Engine.Blueprint Name="BP_Lift" ExportPath="/Script/Engine.Blueprint'${bp}.BP_Lift'"`,
+    `   ParentClass="/Script/CoreUObject.Class'/Script/Engine.Actor'"`,
+    `   NewVariables(0)=(VarName="Armed",VarType=(PinCategory="bool"),PropertyFlags=5)`,
+    "End Object",
+  ].join("\n");
+  const row = (name: string, cls: string, more: Record<string, unknown> = {}) => ({ name, class: cls, parent: null, inherited: false, native: false, ...more });
+  const structure = {
+    blueprint: { class: "Blueprint" },
+    components: [
+      row("DefaultSceneRoot", "/Script/Engine.SceneComponent", { default_scene_root: true }),
+      row("Car", "/Script/Engine.StaticMeshComponent"),
+      row("RideBox", "/Script/Engine.BoxComponent"),
+      row("Car", "/Script/Engine.StaticMeshComponent"),
+      row("Inherited", "/Script/Engine.SceneComponent", { inherited: true }),
+      row("None", "/Script/Engine.SceneComponent", { native: true }),
+      row("Armed", "/Script/Engine.SceneComponent"),
+    ],
+  };
+  const m = manualFromExport(bp, body, structure, { units: [], variables: [] });
+  assert.deepEqual(m.components, [
+    { name: "DefaultSceneRoot", cls: "/Script/Engine.SceneComponent" },
+    { name: "Car", cls: "/Script/Engine.StaticMeshComponent" },
+    { name: "RideBox", cls: "/Script/Engine.BoxComponent" },
+  ]);
+  const f = emitManual(m);
+  assert.match(f.text, /@bpPath \/TestMod\/Rooms\/BP_Lift\.BP_Lift_C:Car\n {3}\* @bpType object:\/Script\/Engine\.StaticMeshComponent\n {3}\* @bpComponent\n {3}\* @bpHandMade/);
+  assert.match(f.text, / {2}readonly RideBox: BoxComponent;/);
+  assert.doesNotMatch(f.text, /Inherited|readonly None/);
+  // no components at all: the field stays off the asset (old seeds compare equal)
+  assert.equal(manualFromExport(bp, body, { blueprint: { class: "Blueprint" } }, { units: [], variables: [] }).components, undefined);
+});

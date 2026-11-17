@@ -524,6 +524,49 @@ test("(S19b) a field initializer becomes the variable default; changing it updat
   });
 });
 
+test("(S19d) a re-sync before the publish brings back the mod's old default: the next build sets the TypeScript default again", async () => {
+  await withRig({ ...OPS, variableDefaults: true }, async (r) => {
+    const base = tally("BP_Tally").replace("import type { int }", "import type { int, float }");
+    tallyOnly(r.dir, base);
+    const write = (fields: string): void =>
+      writeFileSync(join(r.dir, "src", "Tally.ts"), base.replace("  Total!: int;", `  Total!: int;\n${fields}`), "utf8");
+    write("  Speed: float = 2.5;");
+    let x = await r.run(["build"]);
+    assert.equal(x.code, 0, x.out);
+    x = await r.run(["publish"]);
+    assert.equal(x.code, 0, x.out);
+    r.backend.markPublished();
+    assert.equal(readManifest(r.dir, TA)?.variablesPublished, true);
+
+    // built, not published; then a bake saves another mod asset and the stage is copied from the mod again
+    write("  Speed: float = 4;");
+    x = await r.run(["build"]);
+    assert.equal(x.code, 0, x.out);
+    assert.equal(r.backend.variableDefault(TA, "Speed"), "4");
+    r.backend.stageStale = ["Content/Relay/BP_Relay.uasset"];
+    const before = appliedSpecs(r).length;
+    x = await r.run(["build"]);
+    assert.equal(x.code, 0, x.out);
+    assert.match(x.out, /warning ABFC4017/);
+    const specs = appliedSpecs(r).slice(before).filter((s) => s.asset === TA);
+    assert.ok(specs.some((s) => s.variable_defaults?.Speed === "4"), JSON.stringify(specs));
+    assert.equal(r.backend.variableDefault(TA, "Speed"), "4", "the stage holds the TypeScript default again, not the mod's 2.5");
+    x = await r.run(["build"]);
+    assert.match(x.out, /up to date/);
+
+    // published: a later re-sync brings the right default back, nothing is sent again
+    x = await r.run(["publish"]);
+    assert.equal(x.code, 0, x.out);
+    r.backend.markPublished();
+    r.backend.stageStale = ["Content/Relay/BP_Relay.uasset"];
+    const before2 = appliedSpecs(r).length;
+    x = await r.run(["build"]);
+    assert.equal(x.code, 0, x.out);
+    assert.ok(appliedSpecs(r).slice(before2).every((s) => s.asset !== TA || s.variable_defaults === undefined), x.out);
+    assert.equal(r.backend.variableDefault(TA, "Speed"), "4");
+  });
+});
+
 test("(S19c) a backend without variable_defaults warns ABFC2084 for a changed default and leaves it as it is", async () => {
   await withRig({ ...OPS }, async (r) => {
     const base = tally("BP_Tally").replace("import type { int }", "import type { int, float }");
@@ -647,6 +690,31 @@ test("(S12c) class defaults of an asset saved in the Mod Editor are applied agai
     x = await r.run(["build"]);
     assert.match(x.out, /up to date/);
     assert.equal(defaultsAssets(r).length, 3, "a rebuild applies nothing");
+  });
+});
+
+test("(S12e) an asset that only gets its class defaults again is not read back from the editor after the apply", async () => {
+  await withRig({ ...OPS }, async (r) => {
+    const withTick = (cls: string): string => tally(cls).replace("@blueprint()", "@blueprint({ tickInterval: 0.5 })");
+    tallyOnly(r.dir, withTick("BP_Zed"));
+    writeFileSync(join(r.dir, "src", "Other.ts"), withTick("BP_Other"), "utf8");
+    let x = await r.run(["build"]);
+    assert.equal(x.code, 0, x.out);
+    x = await r.run(["publish"]);
+    assert.equal(x.code, 0, x.out);
+    r.backend.markPublished();
+
+    // --resync re-applies every asset's class defaults (TypeScript wins); no unit changed, so nothing is read after the apply
+    const from = r.backend.calls.length;
+    x = await r.run(["build", "--resync"]);
+    assert.equal(x.code, 0, x.out);
+    const calls = r.backend.calls.slice(from);
+    const lastApply = calls.map((c) => c.tool).lastIndexOf("bp_apply");
+    assert.ok(lastApply >= 0, "the defaults pass ran");
+    assert.deepEqual(defaultsAssets({ backend: { calls } }).sort(), ["/TestMod/BP_Other", "/TestMod/BP_Zed"]);
+    assert.equal(calls.slice(lastApply).filter((c) => c.tool === "bp_read").length, 0, "no read back of a defaults-only asset");
+    const rec = readFileSync(join(r.dir, ".abfc", "runs.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l) as { step: string; units?: number });
+    assert.equal(rec.filter((e) => e.step === "build.record").at(-1)?.units, 0);
   });
 });
 
@@ -1162,5 +1230,107 @@ test("(S33) per-graph node names (as in Unreal): a class with functions has no d
     assert.deepEqual(specs.flatMap((s) => (s.functions ?? []).map((f: any) => f.name)), ["addThree"]);
     x = await r.run(["status"]);
     assert.doesNotMatch(x.out, /ABFC500[12]/, x.out);
+  });
+});
+
+test("(S40) after a re-sync the build reads only assets whose files changed since an earlier read; --full reads every asset from the editor", async () => {
+  await withRig({ handMadeEvent: false }, async (r) => {
+    writeFileSync(join(r.dir, "src", "Tally.ts"), tally("BP_Tally"), "utf8"); // two owned assets: BP_Relay and BP_Tally
+    let x = await r.run(["build"]);
+    assert.equal(x.code, 0, x.out);
+    r.backend.markPublished();
+    const reads = (): number => r.backend.calls.filter((c) => c.tool === "bp_read").length;
+    // The Mod Editor saved some other file of the mod: the next build re-syncs and goes over every owned asset.
+    r.backend.stageStale = ["Content/Rooms/M_SomeMaterial.uasset"];
+    x = await r.run(["build"]);
+    assert.equal(x.code, 0, x.out);
+    assert.match(x.out, /warning ABFC4017/);
+    const first = reads();
+
+    // The same again: nothing abfc owns changed, so every read comes from the cache.
+    r.backend.stageStale = ["Content/Rooms/M_SomeMaterial.uasset"];
+    x = await r.run(["build"]);
+    assert.equal(x.code, 0, x.out);
+    assert.match(x.out, /warning ABFC4017/);
+    assert.equal(reads(), first, "no bp_read after a re-sync that left the owned assets' files as they were");
+
+    // generate --resync checks the manifests against the re-synced stage through the same cache
+    const owned = ["/TestMod/Relay/BP_Relay", "/TestMod/BP_Tally"];
+    const ownedReads = (): number => r.backend.calls.filter((c) => c.tool === "bp_read" && owned.includes(String(c.asset))).length;
+    const ownedBefore = ownedReads();
+    // (the fake backend cannot reflect, so the command stops after the stage step; the re-sync and its check ran)
+    x = await r.run(["generate", "--resync"]);
+    assert.match(x.out, /does not reflect/);
+    assert.equal(ownedReads(), ownedBefore, "the re-sync's manifest check of generate reads no owned asset from the editor");
+
+    // An editor edit of an owned asset changes its file: only that asset is read from the editor (and the edit is found, TS wins).
+    r.backend.stageStale = ["Content/Tally.uasset"];
+    r.backend.addHandMadeVariable("/TestMod/BP_Tally", "HandMade", "bool");
+    r.backend.markPublished();
+    x = await r.run(["build"]);
+    assert.equal(x.code, 0, x.out);
+    assert.ok(reads() > first, "the edited asset is read again");
+    assert.ok(reads() - first <= 2, `only the edited asset is read (twice at most: re-sync check and plan), got ${reads() - first}`);
+
+    // --full: every owned asset from the editor.
+    const beforeFull = reads();
+    x = await r.run(["build", "--full"]);
+    assert.equal(x.code, 0, x.out);
+    assert.ok(reads() - beforeFull >= 2, `--full reads every owned asset, got ${reads() - beforeFull}`);
+  });
+});
+
+const GUN_STUB = [
+  "// generated by abfc generate 0.1.0 for test; do not edit, never commit",
+  'import type { Actor } from "/Script/FakeEngine";',
+  "",
+  "/**",
+  " * @bpPath /Game/Fake/BP_FakeGun.BP_FakeGun_C",
+  " * @bpMeta /Script/Engine.BlueprintGeneratedClass",
+  " * @bpCastPin AsBPFakeGun",
+  " */",
+  "export declare class BP_FakeGun_C extends Actor {",
+  "  /**",
+  "   * Calls BP_FakeGun_C.GunStartFiring (Gun Start Firing).",
+  "   * @bpPath /Game/Fake/BP_FakeGun.BP_FakeGun_C:GunStartFiring",
+  "   */",
+  "  GunStartFiring(): void;",
+  "}",
+  "",
+].join(String.fromCharCode(10));
+
+function gunProject(dir: string): void {
+  writeFileSync(join(dir, ".abfc", "stubs", "test", "Game", "Fake", "BP_FakeGun.d.ts"), GUN_STUB, "utf8");
+  tallyOnly(
+    dir,
+    [
+      'import { blueprint, override } from "@abfc/runtime";',
+      'import { BP_FakeGun_C } from "/Game/Fake/BP_FakeGun";',
+      "",
+      "@blueprint()",
+      "export class BP_Hook extends BP_FakeGun_C {",
+      "  Fired: boolean = false;",
+      "  @override",
+      "  override GunStartFiring(): void {",
+      "    this.Fired = true;",
+      "  }",
+      "}",
+      "",
+    ].join(String.fromCharCode(10)),
+  );
+}
+
+test("(S41) an @override of a member a Blueprint class declares is applied as a function graph that names the parent", async () => {
+  // GunStartFiring is a function in the game's gun Blueprint: an override event of it came out as a custom event (ABFC6003, PC run 9 Nov)
+  await withRig({ handMadeEvent: false, overrideAsCustomEvent: true }, async (r) => {
+    gunProject(r.dir);
+    const x = await r.run(["build"]);
+    assert.equal(x.code, 0, x.out);
+    assert.doesNotMatch(x.out, /ABFC6003/);
+    const specs = appliedSpecs(r);
+    const fn = specs.flatMap((s) => s.functions ?? []).find((f: any) => f.name === "GunStartFiring");
+    assert.equal(fn?.override, "/Game/Fake/BP_FakeGun.BP_FakeGun_C");
+    assert.deepEqual(fn?.outputs, []);
+    assert.equal(specs.flatMap((s) => (s.graphs ?? []).flatMap((g: any) => g.add ?? [])).some((n: any) => n.k === "override"), false);
   });
 });

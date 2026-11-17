@@ -1,5 +1,5 @@
 // Build planner: IR + manifests + stage snapshots -> the units to (re)apply, and the diagnostics that block others.
-import { classDefaultsHash, structFieldsHash, t3dNodeKey, t3dNodeName } from "@abfc/ir";
+import { classDefaultsHash, sameBpType, structFieldsHash, t3dNodeKey, t3dNodeName } from "@abfc/ir";
 import type { ApplyPlan, AssetPlan, Diagnostic, IrModule, IrUnit, IrVariable, Span, T3dNode } from "@abfc/ir";
 import { builtGraphMatches, driftDiagnostics, unitState } from "../ownership/drift.js";
 import { analyzeAdoption } from "../ownership/adopt.js";
@@ -7,6 +7,8 @@ import type { StageInfo } from "../ownership/drift.js";
 import type { Manifest, ManifestUnit } from "../ownership/manifest.js";
 
 export interface PlanInput {
+  /** Refuse (ABFC5019) instead of replacing hand-made work with an ABFC5014 warning (abf.config.json `protectEditorEdits`). */
+  protectEditorEdits?: boolean;
   manifests: Map<string, Manifest | null>;
   /** Parsed `bp_read` export per asset: node name -> node. */
   snapshots: Map<string, Map<string, T3dNode>>;
@@ -79,6 +81,16 @@ function hasFunctionGraph(snapshot: Map<string, T3dNode>, graph: string): boolea
   return false;
 }
 
+/** Nodes of a function graph other than its entry, result and intermediate nodes (what a hand-made function holds). */
+function functionBodyNodes(snapshot: Map<string, T3dNode>, graph: string): number {
+  let n = 0;
+  for (const x of snapshot.values()) {
+    if (x.graph !== graph || isIntermediate(x) || x.cls.endsWith("K2Node_FunctionEntry") || x.cls.endsWith("K2Node_FunctionResult")) continue;
+    n++;
+  }
+  return n;
+}
+
 /** A call node whose function is `name` of the asset's own class (self context). */
 function callsOwnFunction(n: T3dNode, name: string): boolean {
   return n.head.some((h) => h.startsWith("FunctionReference=") && h.includes(`MemberName="${name}"`) && h.includes("bSelfContext=True"));
@@ -145,7 +157,7 @@ function defaultsStale(asset: IrModule["assets"][number], manifest: Manifest | n
  */
 export function assetsNeedingRead(
   ir: IrModule,
-  input: { manifests: Map<string, Manifest | null>; stage: StageInfo; forceReplan?: Set<string>; directorRows?: boolean; editedInMod?: Set<string> },
+  input: { manifests: Map<string, Manifest | null>; stage: StageInfo; forceReplan?: Set<string>; directorRows?: boolean; editedInMod?: Set<string>; variableDefaults?: boolean },
 ): Set<string> {
   const out = new Set<string>();
   for (const asset of ir.assets) {
@@ -167,6 +179,7 @@ export function assetsNeedingRead(
       (manifest?.units.some((mu) => !asset.units.some((unit) => unit.id === mu.id)) ?? false) ||
       defaultsStale(asset, manifest, input.stage, input.directorRows === true, input.editedInMod) ||
       fieldsStale(asset, manifest) ||
+      (input.variableDefaults !== false && variablesUnsynced(asset, manifest, input.stage, input.editedInMod)) ||
       parentStale(asset, manifest);
     if (need) out.add(asset.path);
   }
@@ -181,6 +194,17 @@ export function assetsNeedingRead(
 function parentStale(asset: IrModule["assets"][number], manifest: Manifest | null): boolean {
   if (manifest?.parent === undefined || asset.create === undefined || asset.structFields !== undefined) return false;
   return manifest.parent.toLowerCase() !== asset.create.parent.toLowerCase();
+}
+
+/**
+ * The defaults the manifest records for the asset's own fields may not be in the staged copy: the stage was re-synced from the mod
+ * after they were applied and before a publish copied them (or a legacy manifest that never recorded the sync), or the Mod Editor
+ * saved the asset. The next build then sends every own field's default again (TS wins), as `defaultsStale` does for class defaults.
+ */
+export function variablesUnsynced(asset: IrModule["assets"][number], manifest: Manifest | null, stage: StageInfo, editedInMod?: Set<string>): boolean {
+  if (manifest === null || !asset.variables.some((v) => v.temp !== true && v.default !== undefined)) return false;
+  if (editedInMod?.has(asset.path.toLowerCase()) === true) return true;
+  return (manifest.variablesStageSyncedAt ?? null) !== stage.syncedAt && manifest.variablesPublished !== true;
 }
 
 /** Own fields (non-temp variables) of the asset that differ from what the manifest recorded (new, retyped or gone from the TS). */
@@ -267,11 +291,11 @@ export function planBuild(ir: IrModule, input: PlanInput): PlanResult {
     const removeVariables: string[] = [];
     for (const v of fieldVars) {
       const mv = manifest?.variables.find((m) => m.name === v.name);
-      if (mv === undefined || mv.type === v.type) continue;
+      if (mv === undefined || sameBpType(mv.type, v.type)) continue;
       // The variable on the stage already has the TS type: the record is stale, not the field changed (a class this field points at was
       // renamed on the stage, which fixed the variable up, and an earlier build stopped before the manifest followed).
       const onStage = input.snapshotVariableTypes?.get(asset.path)?.get(v.name);
-      if (onStage !== undefined && onStage.toLowerCase() === v.type.toLowerCase()) continue;
+      if (onStage !== undefined && sameBpType(onStage, v.type)) continue;
       retypedFields.add(v.name);
       if (declared.has(v.name)) removeVariables.push(v.name);
       diagnostics.push({
@@ -309,7 +333,7 @@ export function planBuild(ir: IrModule, input: PlanInput): PlanResult {
     const retypedInAsset = new Set<string>();
     for (const v of fieldVars) {
       const onStage = input.snapshotVariableTypes?.get(asset.path)?.get(v.name);
-      if (onStage === undefined || onStage.toLowerCase() === v.type.toLowerCase() || !declared.has(v.name)) continue;
+      if (onStage === undefined || sameBpType(onStage, v.type) || !declared.has(v.name)) continue;
       if (manifest?.variables.find((m) => m.name === v.name)?.type !== v.type) continue;
       retypedInAsset.add(v.name);
       removeVariables.push(v.name);
@@ -323,10 +347,12 @@ export function planBuild(ir: IrModule, input: PlanInput): PlanResult {
     const newFields = fieldVars.filter((v) => !declared.has(v.name) || retypedInAsset.has(v.name) || retypedFields.has(v.name));
     // A changed or removed initializer of a field that stays in the asset updates its default in place (new and recreated fields carry it in `variables`).
     const variableDefaults: Record<string, string | null> = {};
+    const resendDefaults = input.variableDefaults !== false && variablesUnsynced(asset, manifest, input.stage, input.editedInMod);
     for (const v of fieldVars) {
       if (!declared.has(v.name) || retypedInAsset.has(v.name) || retypedFields.has(v.name)) continue;
       const mv = manifest?.variables.find((m) => m.name === v.name);
-      if (mv === undefined || (mv.default ?? null) === (v.default ?? null)) continue;
+      if (mv === undefined) continue;
+      if ((mv.default ?? null) === (v.default ?? null) && !(resendDefaults && v.default !== undefined)) continue;
       if (input.variableDefaults === false) {
         diagnostics.push({
           severity: "warning",
@@ -344,6 +370,14 @@ export function planBuild(ir: IrModule, input: PlanInput): PlanResult {
 
     /** What this build replaces or removes from the asset beyond its own changes (TS wins): reported once as ABFC5014. */
     const report: string[] = [];
+    /** The part of `report` that loses work made in the Mod Editor (`protectEditorEdits` refuses it, ABFC5019). */
+    const losses: string[] = [];
+    const lose = (text: string): void => {
+      report.push(text);
+      losses.push(text);
+    };
+    /** Drift of an owned unit: an edit made in the editor (ABFC5001) is a loss; missing nodes come back, nothing is lost. */
+    const drifted = (d: Diagnostic): void => (d.code === "ABFC5001" ? lose : (t: string) => report.push(t))(`${d.code}: ${d.message}`);
     const abfcEdited = input.editedByAbfc !== undefined && [...input.editedByAbfc].some((p) => p.toLowerCase() === asset.path.toLowerCase());
     const picked: Array<{ unit: IrUnit; removeNodes: string[] }> = [];
     /** Names of events that this build adds (no custom event in the stage yet). */
@@ -357,7 +391,11 @@ export function planBuild(ir: IrModule, input: PlanInput): PlanResult {
       // A function graph is owned whole: whenever it is planned it is recreated (remove_functions + functions), so no node is removed one by one.
       if (unit.kind === "function") {
         if (!mu) {
-          if (hasFunctionGraph(snapshot, unit.graph)) report.push(`${unit.id}: replaced the hand-made function of the same name`);
+          if (hasFunctionGraph(snapshot, unit.graph)) {
+            // an empty hand-made function (an override made only so the build fills it) loses nothing
+            const body = functionBodyNodes(snapshot, unit.graph);
+            (body > 0 ? lose : (t: string) => report.push(t))(`${unit.id}: replaced the hand-made function of the same name${body > 0 ? ` (${plural(body, "node")})` : ""}`);
+          }
           picked.push({ unit, removeNodes: [] });
           continue;
         }
@@ -367,7 +405,7 @@ export function planBuild(ir: IrModule, input: PlanInput): PlanResult {
         }
         const fnDrift = driftDiagnostics(asset.path, [mu], snapshot, input.stage, spans, { severity: "warning" });
         if (fnDrift.length > 0) {
-          if (!abfcEdited) for (const d of fnDrift) report.push(`${d.code}: ${d.message}`);
+          if (!abfcEdited) for (const d of fnDrift) drifted(d);
           picked.push({ unit, removeNodes: [] });
         } else if (state === "pendingAdoption" || state === "staleStage" || mu.irHash !== unit.hash || retypedFields.size > 0 || input.forceReplan?.has(`${asset.path} ${unit.id}`) === true) {
           picked.push({ unit, removeNodes: [] });
@@ -386,7 +424,8 @@ export function planBuild(ir: IrModule, input: PlanInput): PlanResult {
           } catch {
             // no entry node in the snapshot (the name comes from the `_Manual` interface only): nothing to remove
           }
-          report.push(`${unit.id}: replaced the hand-made ${unit.kind === "override" ? "override" : "event"} of the same name${handMadeNodes.length > 0 ? ` (${plural(handMadeNodes.length, "node")})` : ""}`);
+          // the entry node alone (an empty override made only so the build fills it) loses nothing
+          (handMadeNodes.length > 1 ? lose : (t: string) => report.push(t))(`${unit.id}: replaced the hand-made ${unit.kind === "override" ? "override" : "event"} of the same name${handMadeNodes.length > 0 ? ` (${plural(handMadeNodes.length, "node")})` : ""}`);
         }
         if (unit.kind === "event" && !hasHandMadeEvent(snapshot, unit.name)) newEvents.add(unit.name);
         // a manifest unit that was never applied records no tag, but may still have left some
@@ -398,7 +437,7 @@ export function planBuild(ir: IrModule, input: PlanInput): PlanResult {
       // TS wins: an edited, missing-node or changed-adoption unit is replaced, never refused. The report names what was found.
       const drift = driftDiagnostics(asset.path, [mu], snapshot, input.stage, spans, { severity: "warning" });
       if (drift.length > 0) {
-        if (!abfcEdited) for (const d of drift) report.push(`${d.code}: ${d.message}`);
+        if (!abfcEdited) for (const d of drift) drifted(d);
         picked.push({ unit, removeNodes: [...mu.nodes.filter((n) => snapshot.has(n)).map(t3dNodeName), ...(mu.adopt?.nodes ?? []).filter((n) => snapshot.has(n)).map(t3dNodeName), ...tagsOf(snapshot, mu.id, mu.graph)] });
         continue;
       }
@@ -440,7 +479,7 @@ export function planBuild(ir: IrModule, input: PlanInput): PlanResult {
         const drift = driftDiagnostics(asset.path, [mu], snapshot, input.stage, new Map<string, Span>(), { severity: "warning" });
         if (drift.length > 0) {
           // TS wins: the removed unit goes although it was edited or lost nodes; the nodes still on the stage are removed.
-          if (!abfcEdited) for (const d of drift) report.push(`${d.code}: ${d.message}`);
+          if (!abfcEdited) for (const d of drift) drifted(d);
           removeUnits.push({ id: mu.id, graph: mu.graph, nodes: [...mu.nodes.filter((n) => snapshot.has(n)).map(t3dNodeName), ...tagsOf(snapshot, mu.id, mu.graph)] });
         } else forgetUnits.push(mu.id); // adopted hand-made nodes of a stale stage: nothing of abfc's to remove
       }
@@ -469,7 +508,7 @@ export function planBuild(ir: IrModule, input: PlanInput): PlanResult {
     const functions: NonNullable<AssetPlan["functions"]> = [];
     for (const p of picked) {
       if (p.unit.kind !== "function") continue;
-      functions.push({ name: p.unit.name, inputs: p.unit.signature.inputs, outputs: p.unit.signature.outputs, access: p.unit.signature.access ?? "public" });
+      functions.push({ name: p.unit.name, inputs: p.unit.signature.inputs, outputs: p.unit.signature.outputs, access: p.unit.signature.access ?? "public", ...(p.unit.signature.override !== undefined ? { override: p.unit.signature.override } : {}) });
       if (hasFunctionGraph(snapshot, p.unit.graph)) removeFunctionSet.add(p.unit.graph);
     }
 
@@ -556,7 +595,7 @@ export function planBuild(ir: IrModule, input: PlanInput): PlanResult {
         if (tsFunction || inherited || isIntermediate(entry) || delegates.has(graph) || graph === "UserConstructionScript" || removeFunctionSet.has(graph)) continue;
         dropGraphs.add(graph);
         removeFunctionSet.add(graph);
-        report.push(`removed the hand-made function ${graph}`);
+        lose(`removed the hand-made function ${graph}`);
       }
       const byGraph = new Map<string, string[]>();
       for (const n of snapshot.values()) {
@@ -571,7 +610,7 @@ export function planBuild(ir: IrModule, input: PlanInput): PlanResult {
       }
       for (const [graph, nodes] of byGraph) {
         removeGraphNodes.push({ graph, nodes });
-        report.push(`removed ${plural(nodes.length, "hand-made node")} from ${graph} (${nodes.slice(0, 5).join(", ")}${nodes.length > 5 ? ", ..." : ""})`);
+        lose(`removed ${plural(nodes.length, "hand-made node")} from ${graph} (${nodes.slice(0, 5).join(", ")}${nodes.length > 5 ? ", ..." : ""})`);
       }
       const fields = new Set(fieldVars.map((v) => v.name));
       const handMadeVars: string[] = [];
@@ -582,7 +621,7 @@ export function planBuild(ir: IrModule, input: PlanInput): PlanResult {
       }
       if (handMadeVars.length > 0) {
         removeVariables.push(...handMadeVars);
-        report.push(`removed the hand-made ${handMadeVars.length === 1 ? "variable" : "variables"} ${handMadeVars.join(", ")}`);
+        lose(`removed the hand-made ${handMadeVars.length === 1 ? "variable" : "variables"} ${handMadeVars.join(", ")}`);
       }
     }
 
@@ -618,6 +657,16 @@ export function planBuild(ir: IrModule, input: PlanInput): PlanResult {
           ...(asset.director !== undefined ? { director: { asset: asset.director.asset, classPath, ...(asset.director.tag !== undefined ? { tag: asset.director.tag } : {}) } } : {}),
         };
       }
+    }
+    if (input.protectEditorEdits === true && losses.length > 0 && !abfcEdited) {
+      diagnostics.push({
+        severity: "error",
+        code: "ABFC5019",
+        asset: asset.path,
+        message: `${asset.path.slice(asset.path.lastIndexOf("/") + 1)}: this build would replace work made in the Mod Editor (protectEditorEdits is on): ${losses.join("; ")}. Nothing was applied.`,
+        fix: "move the hand-made work into the .ts file (or make the class hybrid with a _Manual interface to keep it), or run abfc build --replace-editor-edits to let TypeScript win this once.",
+      });
+      continue;
     }
     if (report.length > 0) {
       diagnostics.push({
@@ -674,8 +723,20 @@ export function planBuild(ir: IrModule, input: PlanInput): PlanResult {
     });
 
     const prefixes = picked.map((p) => `abfc_${p.unit.name}_`);
+    // A temp of a re-planned unit whose variable in the asset has another type (temps are numbered in source order, so a new
+    // temp earlier in the unit shifts the others) is removed and declared again with its new type.
+    const retypedTemps = new Set<string>();
+    for (const v of asset.variables) {
+      if (v.temp !== true || !declared.has(v.name) || !prefixes.some((pre) => v.name.startsWith(pre))) continue;
+      const onStage = input.snapshotVariableTypes?.get(asset.path)?.get(v.name);
+      if (onStage === undefined || sameBpType(onStage, v.type)) continue;
+      retypedTemps.add(v.name);
+      if (!removeVariables.includes(v.name)) removeVariables.push(v.name);
+    }
     const variables: IrVariable[] = asset.variables.filter(
-      (v) => (v.temp === true ? prefixes.some((pre) => v.name.startsWith(pre)) : true) && (!declared.has(v.name) || retypedInAsset.has(v.name) || retypedFields.has(v.name)),
+      (v) =>
+        (v.temp === true ? prefixes.some((pre) => v.name.startsWith(pre)) : true) &&
+        (!declared.has(v.name) || retypedInAsset.has(v.name) || retypedFields.has(v.name) || retypedTemps.has(v.name)),
     );
     // Entry nodes of cross wire targets that stay as they are: their real names come from the manifest.
     const entryNames: Record<string, string> = {};
@@ -693,6 +754,8 @@ export function planBuild(ir: IrModule, input: PlanInput): PlanResult {
       variables,
       units,
       classMeta: ir.classMeta,
+      ...(asset.interfaces !== undefined && asset.interfaces.length > 0 ? { interfaces: [...asset.interfaces] } : {}),
+      ...(asset.components !== undefined && asset.components.length > 0 ? { components: asset.components } : {}),
       ...(Object.keys(entryNames).length > 0 ? { entryNames } : {}),
       ...(defaults !== undefined ? { defaults } : {}),
       ...(removeUnits.length > 0 ? { removeUnits } : {}),
@@ -701,6 +764,7 @@ export function planBuild(ir: IrModule, input: PlanInput): PlanResult {
       ...(removeGraphNodes.length > 0 ? { removeGraphNodes } : {}),
       ...(removeVariables.length > 0 ? { removeVariables } : {}),
       ...(hasVariableDefaults ? { variableDefaults } : {}),
+      ...(resendDefaults ? { variablesResynced: true as const } : {}),
       ...(removeFunctionSet.size > 0 ? { removeFunctions: [...removeFunctionSet].sort() } : {}),
       ...(functions.length > 0 ? { functions } : {}),
       ...(forgetVariables.length > 0 ? { forgetVariables } : {}),

@@ -17,6 +17,26 @@ export interface ParsedBpType {
   value?: ParsedBpType;
 }
 
+/**
+ * Whether two type strings name the same Blueprint type: `real` and `double` are one type (an exported variable reads back
+ * as `real`), and case is ignored. A string that does not parse is compared as text.
+ */
+export function sameBpType(a: string, b: string): boolean {
+  if (a.toLowerCase() === b.toLowerCase()) return true;
+  let pa: ParsedBpType, pb: ParsedBpType;
+  try {
+    pa = parseBpType(a);
+    pb = parseBpType(b);
+  } catch {
+    return false;
+  }
+  const eq = (x: ParsedBpType | undefined, y: ParsedBpType | undefined): boolean =>
+    x === undefined || y === undefined
+      ? x === y
+      : x.cat === y.cat && x.sub === y.sub && x.container === y.container && (x.path ?? "").toLowerCase() === (y.path ?? "").toLowerCase() && eq(x.value, y.value);
+  return eq(pa, pb);
+}
+
 /** Key types of maps and element types of sets (a subset of what the backend grammar accepts). */
 const KEY_TYPES = new Set(["int", "int64", "byte", "name", "string"]);
 

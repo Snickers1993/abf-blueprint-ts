@@ -12,7 +12,8 @@ export const FUNCTION_RETURN_PIN = "ReturnValue";
 export type ParentFamily = "actor" | "component" | "widget" | "object";
 
 /** An own member variable (`Name!: T;` or `Name: T = <literal>` in the TS class); abfc declares it in the asset. `default` is Unreal default-value text. */
-export interface HirField { name: string; type: BpType; default?: string; span: Span }
+/** `component`: the field is a component (`Name = component(Class, props, { attachTo })`), not a member variable; `props` are field-default JSON values by property name. */
+export interface HirField { name: string; type: BpType; default?: string; span: Span; component?: { class: string; props: Record<string, unknown>; attachTo?: string } }
 
 export interface HirClass {
   name: string;
@@ -42,6 +43,8 @@ export interface HirClass {
   director?: { row: string; asset: string; /** The gameplay tag the row holds (`@director("Row", tag)`). */ tag?: string };
   /** `widget`: the asset is a Widget Blueprint (`@blueprint({ kind: "widget" })`). */
   kind?: "widget";
+  /** `@blueprint({ interfaces: [...] })`: class paths of the Blueprint interfaces the asset implements. */
+  interfaces?: string[];
 }
 
 export interface HirEvent {
@@ -57,6 +60,8 @@ export interface HirEvent {
   returnType?: BpType;
   /** Functions: the access specifier. */
   access?: "public" | "protected" | "private";
+  /** A function that overrides a parent function with named outputs (`overrideOf` set): its out pins, in the parent's order. */
+  outputs?: Array<{ name: string; type: BpType }>;
   body: HirStmt[];
   span: Span;
 }
@@ -66,17 +71,27 @@ export type LocalId = number;
 export type HirStmt =
   | { k: "expr"; e: HirExpr; span: Span }
   | { k: "setSelf"; name: string; type: BpType; value: HirExpr; span: Span }
-  | { k: "const"; local: LocalId; name: string; init: HirExpr; uses: number; span: Span }
+  /** `bindEvent(source, "Dispatcher", target, "Function")`: Add Delegate on the source's dispatcher with a Create Event of the target's function. `sourceClass` is the source's class path. */
+  /**
+   * `bindEvent(source, "Disp", target, "Fn")`. `ownEvent`: the target is `this` and Fn an own `@event`, bound through the
+   * event's own delegate pin (no Create Event node, as a hand-made "Bind Event" wired to a red event square).
+   */
+  | { k: "bind"; source: HirExpr; sourceClass: string; dispatcher: string; target: HirExpr | null; fn: string; ownEvent?: true; span: Span }
+  /** `obj.Var = value` on another object (a Set node with its Target wired); `owner` is the class declaring the variable. */
+  | { k: "setOn"; obj: HirExpr; owner: string; name: string; type: BpType; value: HirExpr; span: Span }
+  /** `nextOnly`: every use is inside the very next statement (an expression, const or return statement, or the condition of an if), read once right away. */
+  | { k: "const"; local: LocalId; name: string; init: HirExpr; uses: number; nextOnly?: boolean; span: Span }
   | { k: "if"; cond: HirExpr; then: HirStmt[]; else: HirStmt[]; span: Span }
-  | { k: "return"; value?: HirExpr; span: Span }
+  /** `outs`: the values of named out pins (`return { Out: v }` in an override of a parent function with outputs). */
+  | { k: "return"; value?: HirExpr; outs?: Array<{ pin: string; value: HirExpr }>; span: Span }
   /** `index`: `arr.forEach((x, i) => ...)`: local of the index parameter (the loop index, int). */
   | { k: "forOf"; local: LocalId; name: string; array: HirExpr; elem: BpType; index?: LocalId; body: HirStmt[]; span: Span }
   /** `this.X = c ? a : b`: Branch plus one set per side. */
   | { k: "setSelfCond"; name: string; type: BpType; cond: HirExpr; a: HirExpr; b: HirExpr; span: Span }
   /** `for (let i = A; cond; i++ | i--)` with an int counter; the counter is only visible in `cond` and `body`. */
   | { k: "forCount"; counter: LocalId; name: string; init: HirExpr; cond: HirExpr; step: 1 | -1; body: HirStmt[]; span: Span }
-  /** Mutation of an own array variable: `push(x)`, `splice(i, 1)` (removeAt), `length = 0` (clear). `array.type` is the array type, e.g. "array:name". */
-  | { k: "arrayOp"; op: "push" | "removeAt" | "clear"; array: { self: string; type: BpType }; value?: HirExpr; index?: HirExpr; span: Span }
+  /** Mutation of an own array variable: `push(x)`, `splice(i, 1)` (removeAt), `length = 0` (clear), `[i] = x` (set). `array.type` is the array type, e.g. "array:name". */
+  | { k: "arrayOp"; op: "push" | "removeAt" | "clear" | "set"; array: { self: string; type: BpType }; value?: HirExpr; index?: HirExpr; span: Span }
   /** Mutation of an own map/set variable: Map `set`/`delete`/`clear`, Set `add`/`delete`/`clear`. `target.type` is e.g. "map:name:int" or "set:name". */
   | { k: "containerOp"; container: "map" | "set"; op: "add" | "remove" | "clear"; target: { self: string; type: BpType }; key?: HirExpr; value?: HirExpr; span: Span }
   /** `break`/`continue` of the innermost enclosing loop (a `return;` directly in a forEach callback is a `continue`). */
@@ -88,7 +103,8 @@ export type HirExpr = (
   | { k: "param"; name: string }
   | { k: "local"; id: LocalId }
   | { k: "lit"; value: string | number | boolean | null }
-  | { k: "getSelf"; name: string }
+  /** `owner`: the class declaring an inherited variable or component (not this class), written as the get's MemberParent. */
+  | { k: "getSelf"; name: string; owner?: string }
   | { k: "getOn"; obj: HirExpr; owner: string; name: string }
   | { k: "field"; obj: HirExpr; struct: string; name: string } // struct member read -> BreakStruct
   | { k: "out"; call: HirExpr; pin: string } // multi-output / exec-result member
@@ -104,6 +120,10 @@ export type HirExpr = (
       execOutputs: string[] | null;
       args: Array<{ pin: string; value: HirExpr }>;
       outs: Array<{ pin: string; type: BpType }>;
+      /** `super.X(...)` in the override X: a Call Parent Function node (owner = the parent class). */
+      parentCall?: true;
+      /** `message(obj, I_X_C).Fn(...)`: an interface Message node (K2Node_Message); `target` is the object messaged. */
+      message?: true;
     }
   | { k: "cast"; value: HirExpr; target: string; castPin: string }
   | { k: "optional"; value: HirExpr; then: HirExpr } // a?.b : `then` refers to value via { k: "hole" }
@@ -119,13 +139,18 @@ export type HirExpr = (
   | { k: "callOwn"; name: string; args: Array<{ pin: string; value: HirExpr }> }
   /** A Blueprint class used as a value (`WBP_X_C` in a class-typed argument). */
   | { k: "classRef"; path: string }
+  /** An asset used as a pin's default object (`asset(StaticMesh, "@mod/Meshes/SM_X")`); `text` is the full object text `<class>'<package>.<name>'`. */
+  | { k: "assetRef"; text: string }
   /** A reference to an owned event passed to a delegate-typed parameter (`this.ScanPlayers`). */
   | { k: "delegateRef"; event: string }
   /** Enum value as its T3D text. */
   | { k: "enumLit"; text: string; enumPath: string }
   | { k: "nameLit"; text: string }
   | { k: "createWidget"; cls: string; owner: HirExpr }
-  | { k: "spawn"; cls: string; owner?: HirExpr; collision?: string; scale?: string }
+  /** `getWorldSubsystem(Class)`: a pure Get Subsystem node of the native world subsystem `cls`. */
+  | { k: "subsystem"; cls: string }
+  /** `transform`: the SpawnTransform (absent: identity). */
+  | { k: "spawn"; cls: string; owner?: HirExpr; instigator?: HirExpr; transform?: HirExpr; collision?: string; scale?: string }
   | { k: "arith"; op: "+" | "-" | "*" | "/"; kind: "int" | "real"; a: HirExpr; b: HirExpr }
   | { k: "cmp"; op: "<" | "<=" | ">" | ">="; kind: "int" | "real"; a: HirExpr; b: HirExpr }
   | { k: "index"; array: HirExpr; index: HirExpr; elem: BpType }

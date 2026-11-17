@@ -40,7 +40,12 @@ test("values outside the validated map never reach the template (ABFC2061)", () 
     [{ NetUpdateFrequency: "2" }, undefined],
     [{ NetUpdateFrequency: "__import__('os')" }, undefined],
     [{ Unknown: "True" }, undefined],
-    [{ bStartWithTickEnabled: "False" }, undefined], // unverified: not in the validated map
+    [{ bStartWithTickEnabled: "no" }, undefined],
+    [{ "field:Bad Name": '{"k":"num","v":1}' }, undefined],
+    [{ "field:Mesh": '{"k":"asset","path":"/Game/X\"); import os"}' }, undefined],
+    [{ "field:Mesh": '{"k":"exec","v":"import os"}' }, undefined],
+    [{ "field:S": '{"k":"struct","name":"Vector()); import os #","fields":{}}' }, undefined],
+    [{ "field:S": "not json" }, undefined],
     [{}, "/TestMod/Row\"; import os"],
   ] as Array<[Record<string, string>, string | undefined]>) {
     assert.throws(() => renderDefaultsCode(CLASS, values, row), (e) => codeOf(e) === "ABFC2061");
@@ -57,7 +62,7 @@ function plannedWithDefaults(): ApplyPlan {
   };
 }
 
-test("pass 5 sends one python spec per asset after the tag pass; ABFC2070 lines become warnings", async () => {
+test("pass 5 sends one python spec per asset after the main pass; ABFC2070 lines become warnings", async () => {
   const plan = plannedWithDefaults();
   const c = caps(true, true);
   const ids = nodeIdsFor(plan, c);
@@ -70,11 +75,11 @@ test("pass 5 sends one python spec per asset after the tag pass; ABFC2070 lines 
   const timings: string[] = [];
   const out = await applyPlan(backend, plan, c, profile, { cacheDir: "cache", record: (s) => timings.push(s) });
   assert.equal(out.ok, true);
-  assert.deepEqual(backend.calls.map((x) => x.label), ["main", "tags", "defaults"]);
-  assert.deepEqual(backend.calls[2]!.specs, [renderDefaultsSpec(asset, c)]);
-  const sent = backend.calls[2]!.specs[0]! as { raw: Array<{ kind: string }> };
+  assert.deepEqual(backend.calls.map((x) => x.label), ["main", "defaults"]);
+  assert.deepEqual(backend.calls[1]!.specs, [renderDefaultsSpec(asset, c)]);
+  const sent = backend.calls[1]!.specs[0]! as { raw: Array<{ kind: string }> };
   assert.equal(sent.raw[0]?.kind, "python");
-  assert.deepEqual(timings, ["apply.main", "apply.tags", "apply.defaults"]);
+  assert.deepEqual(timings, ["apply.main", "apply.defaults"]);
   assert.equal(out.perAsset[0]!.defaultsApplied, true);
   assert.equal(out.perAsset[0]!.defaultsWarnings[0]!.code, "ABFC2070");
 });
@@ -160,4 +165,39 @@ test("a director tag: the spec carries class_manager_row.gameplay_tag with class
   const warnings = out.perAsset[0]!.defaultsWarnings.filter((w) => w.code === "ABFC2082");
   assert.equal(warnings.length, 1);
   assert.match(warnings[0]!.message, /update abf-mod-editor-mcp to 2\.6\.0 or newer/);
+});
+
+test("start with tick enabled is written through the tick struct and printed back", () => {
+  const code = renderDefaultsCode(CLASS, { bStartWithTickEnabled: "False" });
+  assert.match(code, /_tick = cdo\.get_editor_property\("primary_actor_tick"\)/);
+  assert.match(code, /_tick\.set_editor_property\("start_with_tick_enabled", False\)/);
+  assert.match(code, /cdo\.set_editor_property\("primary_actor_tick", _tick\)/);
+  assert.match(code, /print\("ABFC_TICK " \+ /);
+});
+
+test("field defaults travel as one JSON string read by the fixed helper", () => {
+  const code = renderDefaultsCode(CLASS, {
+    "field:Mesh": JSON.stringify({ k: "asset", path: "/Game/Meshes/SM_Box.SM_Box" }),
+    "field:Spots": JSON.stringify({ k: "array", items: [{ k: "struct", name: "Vector", fields: { X: { k: "num", v: 1 }, Y: { k: "num", v: 2 }, Z: { k: "num", v: 3 } } }] }),
+  });
+  assert.match(code, /^def _abfc_val\(v\):$/m);
+  assert.match(code, /^for _n, _v in json\.loads\(".*"\):$/m);
+  assert.match(code, /print\("ABFC_FIELDS 2"\)/);
+  const blob = /json\.loads\((".*")\)/.exec(code)![1]!;
+  assert.deepEqual(JSON.parse(JSON.parse(blob)), [
+    ["Mesh", { k: "asset", path: "/Game/Meshes/SM_Box.SM_Box" }],
+    ["Spots", { k: "array", items: [{ k: "struct", name: "Vector", fields: { X: { k: "num", v: 1 }, Y: { k: "num", v: 2 }, Z: { k: "num", v: 3 } } }] }],
+  ]);
+});
+
+test("the structure hash key writes nothing and must be a hex hash", () => {
+  const code = renderDefaultsCode(CLASS, { "abfc:structure": "0123456789abcdef0123456789abcdef" });
+  assert.doesNotMatch(code, /abfc:structure/);
+  assert.throws(() => renderDefaultsCode(CLASS, { "abfc:structure": "x\")\nimport os" }), /hex hash/);
+});
+
+test("a field default is set by its Unreal name, then by the Python name derived from it", () => {
+  const code = renderDefaultsCode(CLASS, { "field:bHidden": JSON.stringify({ k: "bool", v: true }) });
+  assert.match(code, /^def _abfc_set\(o, n, v\):$/m);
+  assert.match(code, /^    _abfc_set\(cdo, _n, _abfc_val\(_v\)\)$/m);
 });

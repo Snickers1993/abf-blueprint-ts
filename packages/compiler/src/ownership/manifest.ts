@@ -1,5 +1,5 @@
 // Hash manifest (design 8.3): `.abfc/manifest/<asset>.json`, committed with the project.
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 export interface ManifestUnit {
@@ -42,6 +42,10 @@ export interface Manifest {
   classDefaultsHash?: string;
   /** `StageStatus.syncedAt` of the stage the class defaults were applied to (a resync discards them). */
   classDefaultsStageSyncedAt?: string | null;
+  /** `StageStatus.syncedAt` of the stage the own fields' defaults were last applied to in full (a re-sync before a publish discards them). */
+  variablesStageSyncedAt?: string | null;
+  /** The defaults recorded in `variables` reached the mod (a publish copied the asset while the stage still held `variablesStageSyncedAt`). */
+  variablesPublished?: true;
   /**
    * The class defaults recorded above reached the mod (a publish copied the asset while the stage still held the sync they were
    * applied to). A later re-sync copies from the mod, so they are still there and the pass does not run again; cleared (absent)
@@ -128,6 +132,49 @@ export function listManifests(dir: string): Manifest[] {
 export function deleteManifest(dir: string, asset: string): void {
   const file = manifestPath(dir, asset);
   if (existsSync(file)) rmSync(file);
+}
+
+/**
+ * `.abfc/published/<asset>.json`: the manifests as they stood after the last publish that succeeded (every owned asset of the stage
+ * was then the same as in the mod). A stage copied from the mod again holds what was published, so when the current manifest names
+ * nodes the stage no longer holds (a build that was never published, a publish that failed), the published entry says which of the
+ * stage's nodes are abfc's own: they stay owned and are replaced, instead of counting as hand-made.
+ */
+export function publishedManifestPath(dir: string, asset: string): string {
+  return join(dir, ".abfc", "published", `${assetFileStem(asset)}.json`);
+}
+
+/** The manifest of an asset as of the last successful publish, or null (never published by this abfc, or unreadable). */
+export function readPublishedManifest(dir: string, asset: string): Manifest | null {
+  try {
+    const file = publishedManifestPath(dir, asset);
+    if (!existsSync(file)) return null;
+    return JSON.parse(readFileSync(file, "utf8").replace(/^\uFEFF/, "")) as Manifest;
+  } catch {
+    return null;
+  }
+}
+
+/** Replaces `.abfc/published` with the current manifests of the mod's assets (call after a publish that succeeded). Best effort. */
+export function snapshotPublishedManifests(dir: string, mod: string): number {
+  const folder = join(dir, ".abfc", "published");
+  const tmp = `${folder}.tmp`;
+  try {
+    rmSync(tmp, { recursive: true, force: true });
+    mkdirSync(tmp, { recursive: true });
+    let n = 0;
+    for (const m of listManifests(dir)) {
+      if (!m.asset.startsWith(`/${mod}/`)) continue;
+      writeFileSync(join(tmp, `${assetFileStem(m.asset)}.json`), stringifySorted(m), "utf8");
+      n++;
+    }
+    rmSync(folder, { recursive: true, force: true });
+    renameSync(tmp, folder);
+    return n;
+  } catch {
+    rmSync(tmp, { recursive: true, force: true });
+    return 0;
+  }
 }
 
 /** Owned unit ids (`event:Name`) and variable names per asset, for stub generation and the frontend. */

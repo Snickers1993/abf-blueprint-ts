@@ -2,7 +2,7 @@
 import { win32 } from "node:path";
 import { nodeKey } from "@abfc/backend";
 import type { Backend } from "@abfc/backend";
-import { buildHir, listManifests, loadProgram, lowerChecked, missingOnlyEngineRewritten, readManifest, readSourceMap, sameClassPath, writeManifest, writeSourceMap } from "@abfc/compiler";
+import { buildHir, listManifests, loadProgram, lowerChecked, missingOnlyEngineRewritten, readManifest, readPublishedManifest, readSourceMap, sameClassPath, writeManifest, writeSourceMap } from "@abfc/compiler";
 import type { CompilerProjectConfig, HirProgram, LoadedProgram, Manifest, ManifestUnit, SourceMapFile } from "@abfc/compiler";
 import { AbfcError } from "@abfc/env";
 import type { ProjectConfig } from "@abfc/env";
@@ -14,6 +14,8 @@ import { SLOW_BACKEND_HINT } from "../progress.js";
 import { backendInfoDiagnostics } from "./backend-version.js";
 import { formatTimings, recordRun } from "../runs.js";
 import type { RunEntry } from "../runs.js";
+import { ReadCache, readCacheIdentity } from "../readcache.js";
+import { stubLockHashOf } from "../unitcache.js";
 
 /**
  * A codegen epoch, not the release version: it is stored in units.json, and a change marks every unit for forceReplan
@@ -182,10 +184,34 @@ export function missingInStage(ctx: CliContext, stagingPath: string, assets: str
   return out;
 }
 
-/** `bp_read` of an asset and the parsed export. */
+/** The read cache a command switched on for its stage ({@link useReadCache}); absent = every read goes to the backend. */
+const readCaches = new WeakMap<CliContext, ReadCache>();
+
+/** Serves {@link readAsset} from `cache` (null switches it off) for the rest of this command. */
+export function useReadCache(ctx: CliContext, cache: ReadCache | null): void {
+  if (cache === null) readCaches.delete(ctx);
+  else readCaches.set(ctx, cache);
+}
+
+/** The read cache in use, if any (for the build's summary). */
+export function readCacheOf(ctx: CliContext): ReadCache | undefined {
+  return readCaches.get(ctx);
+}
+
+/**
+ * `bp_read` of an asset and the parsed export. With a read cache in use, an asset whose stage files (and the mod packages its export
+ * references) are byte-identical to an earlier read is served from the cache instead of the editor.
+ */
 export async function readAsset(ctx: CliContext, backend: Backend, asset: string): Promise<{ text: string; parsed: T3dExport }> {
+  const cache = readCaches.get(ctx);
+  const key = cache?.key(asset) ?? null;
+  if (cache !== undefined && key !== null) {
+    const hit = cache.get(key);
+    if (hit !== null) return { text: hit, parsed: parseExport(hit) };
+  }
   const snap = await backend.read(ctx.config.mod.name, asset);
   const text = ctx.deps.host.readFile(snap.exportPath);
+  if (cache !== undefined && key !== null) cache.put(key, text);
   return { text, parsed: parseExport(text) };
 }
 
@@ -222,6 +248,40 @@ export function unitsHeldByStage<U extends ManifestUnit>(units: readonly U[], st
 }
 
 /**
+ * The read cache of a staging copy (null when the stage path is unknown). Its identity is the backend and editor; reads cached by
+ * versions that also keyed on the stub lock are accepted and moved over.
+ */
+export function readCacheFor(ctx: CliContext, info: BackendInfo, stagingPath: string): ReadCache | null {
+  if (stagingPath === "") return null;
+  const profile = ctx.env.profile;
+  const base = { server: info.serverVersion, engine: info.engineVersion, ext: info.extensions, caps: info.capabilities };
+  return new ReadCache(ctx.paths.cacheDir, stagingPath, ctx.config.mod.name, readCacheIdentity({ ...base, profile: profile.id }), [
+    readCacheIdentity({ ...base, stubs: stubLockHashOf(readLock(win32.join(ctx.paths.stubsDir, profile.id))), profile: profile.id }),
+  ]);
+}
+
+/**
+ * Why the editor was asked for reads the cache could not serve (the misses after `from`), e.g. `read 3 from the editor (2 own files
+ * changed, 1 because Rooms/BP_X changed)`; "" when the cache served everything or there is no cache.
+ */
+export function missSummary(ctx: CliContext, from: number): string {
+  const missed = readCacheOf(ctx)?.missed.slice(from) ?? [];
+  if (missed.length === 0) return "";
+  const prefix = `/${ctx.config.mod.name}/`;
+  const counts = new Map<string, number>();
+  for (const m of missed) {
+    const label =
+      m.reason === "dep" ? `because ${m.dep?.startsWith(prefix) === true ? m.dep.slice(prefix.length) : m.dep} changed`
+      : m.reason === "files" ? "own files changed"
+      : m.reason === "new" ? "not read before"
+      : m.reason === "backend" ? "read with another backend before"
+      : "cached text missing";
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  return `read ${missed.length} from the editor (${[...counts].map(([l, n]) => `${n} ${l}`).join(", ")})`;
+}
+
+/**
  * After the stage was re-synced from the mod (`--resync`, the automatic re-sync after a failed compile, a stage created from
  * scratch): the stage holds only what the mod holds, so the unpublished work of every asset of the mod is gone. The manifests
  * (and source maps) are brought back in line: units whose nodes the stage does not hold are dropped (they were never published,
@@ -254,15 +314,18 @@ export async function pruneManifestsToStage(
       const base = o.base?.get(asset) ?? current;
       if (base === null || base.structFieldsHash !== undefined) continue;
       let units = base.units;
+      // What the last successful publish recorded: the re-synced stage holds those nodes unless the editor changed them since.
+      const publishedUnits = readPublishedManifest(projectDir, asset)?.units ?? [];
+      let fromPublish = 0;
       let stageParent: string | null = null; // the parent the stage holds now (a reparent or recreate of an unpublished stage is gone with the re-sync)
-      if (units.length === 0 && base.parent !== undefined) {
+      if (units.length === 0 && publishedUnits.length === 0 && base.parent !== undefined) {
         try {
           stageParent = (await readAsset(ctx, backend, asset)).parsed.parentClass;
         } catch {
           // unreadable: the recorded parent stays
         }
       }
-      if (units.length > 0) {
+      if (units.length > 0 || publishedUnits.length > 0) {
         let heldNodes: Map<string, T3dNode>;
         try {
           const parsed = (await readAsset(ctx, backend, asset)).parsed;
@@ -281,9 +344,24 @@ export async function pruneManifestsToStage(
           }
         }
         units = unitsHeldByStage(base.units, heldNodes);
+        // A unit whose current entry names nodes the stage lost, or that the manifest no longer lists, but whose published entry the
+        // stage holds node for node: abfc published those nodes, so they stay abfc's (the next build replaces them if the TS changed).
+        // Without this, an unpublished build followed by a re-sync (the mod saved in between, a failed publish) left the published
+        // event in the stage as "hand-made" and the build added a second one of the same name.
+        const kept = new Set(units.map((u) => u.id));
+        for (const pu of publishedUnits) {
+          if (kept.has(pu.id) || pu.nodes.length === 0 || !pu.nodes.every((n) => heldNodes.has(n))) continue;
+          units = [...units, pu];
+          kept.add(pu.id);
+          fromPublish++;
+        }
+        if (fromPublish > 0) {
+          const order = new Map(base.units.map((u, i) => [u.id, i]));
+          units = [...units].sort((a, b) => (order.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (order.get(b.id) ?? Number.MAX_SAFE_INTEGER));
+        }
       }
       const parentChanged = base.parent !== undefined && stageParent !== null && !sameClassPath(base.parent, stageParent);
-      if (!applied.has(asset) && units.length === base.units.length && !parentChanged) continue;
+      if (!applied.has(asset) && units.length === base.units.length && fromPublish === 0 && !parentChanged) continue;
       // The family recorded with the old parent no longer says anything about the parent the stage holds: dropped (the next build asks the backend).
       const { parentFamily: _family, ...rest } = base;
       const restored: Manifest = parentChanged ? { ...rest, units, parent: stageParent! } : { ...base, units };

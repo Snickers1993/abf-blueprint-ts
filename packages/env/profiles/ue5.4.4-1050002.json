@@ -88,7 +88,11 @@
   "filterOverrides": [
     { "parent": "/Script/Engine.Controller", "member": "K2_GetPawn", "reason": "passed mod_audit on a published mod" },
     { "parent": "/Script/Engine.Controller", "member": "IsLocalController", "reason": "passed mod_audit on a published mod" },
-    { "cast": "/Script/Engine.PlayerController", "reason": "passed mod_audit on a published mod" }
+    { "cast": "/Script/Engine.PlayerController", "reason": "passed mod_audit on a published mod" },
+    { "parent": "/Script/Engine.StaticMeshActor", "member": "StaticMeshComponent", "reason": "passed the Mod Editor's Validate 2026-11-08 19:47Z (0 errors) in Return to Sender hand-made graphs (loot crate, lift D6)" },
+    { "parent": "/Script/Engine.SceneComponent", "member": "SetMobility", "reason": "passed the Mod Editor's Validate 2026-11-08 19:47Z (0 errors) in Return to Sender hand-made graphs (loot crate, lift D6)" },
+    { "parent": "/Script/Engine.PrimitiveComponent", "member": "SetCollisionEnabled", "reason": "passed the Mod Editor's Validate 2026-11-08 19:47Z (0 errors) in Return to Sender hand-made graphs (loot crate, lift D6)" },
+    { "parent": "/Script/Engine.StaticMeshComponent", "member": "SetStaticMesh", "reason": "passed the Mod Editor's Validate 2026-11-08 19:47Z (0 errors) in Return to Sender hand-made graphs (loot crate, lift D6)" }
   ],
   "knownLimits": ["PrintString is not logged", "no live HUD in hidden runs", "user pure functions rejected"]
 }

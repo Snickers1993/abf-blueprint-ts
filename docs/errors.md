@@ -435,7 +435,7 @@ Meaning: an array is changed somewhere other than as a statement on an own array
 
 Typical cause: `push` or `splice` on a local array or a parameter, or used as an expression.
 
-Fix: keep the array as a field of the class and write `this.<Array>.push(x)`, `this.<Array>.splice(i, 1)` or `this.<Array>.length = 0` as statements.
+Fix: keep the array as a field of the class and write `this.<Array>.push(x)`, `this.<Array>.splice(i, 1)`, `this.<Array>[i] = x` or `this.<Array>.length = 0` as statements.
 
 ### ABFC2042
 
@@ -483,7 +483,7 @@ Severity: error · Exit: 1 (a field that cannot be declared as written); warning
 
 Meaning: an own field cannot be declared as written (error), or the type of an own field the asset already has was changed (warning: the build removes the variable and creates it again with the new type, and applies every unit of the class again because their get and set nodes carry the old type).
 
-Typical cause: an initializer that is not a literal of the field type (or a default on a struct, object, array, Map, Set or text field, or an integer out of range for its type), `!` together with an initializer, a modifier other than `public`, a type without a Blueprint equivalent, a name that collides with an inherited member; or changing `Hits!: int;` to `Hits!: float;`.
+Typical cause: an initializer that is not a literal of the field type (a struct, object, class, array or text field also takes `asset(Class, "path")`, a class, `null`, a native struct literal or an array literal of those; a Map or Set field takes no default; an integer out of range for its type), `!` together with an initializer, a modifier other than `public`, a type without a Blueprint equivalent, a name that collides with an inherited member; or changing `Hits!: int;` to `Hits!: float;`.
 
 Fix: for the error, declare the field as `Name!: Type;` or `Name: Type = <literal>;` (a number, `true`/`false`, a string or an enum value of the field type) with a supported type and a free name. For the warning nothing is required; values set on placed instances of the class are reset, and hand-made nodes (a class that merges with a `_Manual` interface) that use the variable may fail Unreal's compile (ABFC6001 names them).
 
@@ -591,11 +591,7 @@ Fix: remove the option, or derive from Actor.
 
 Severity: error · Exit: 1
 
-Meaning: the `@blueprint` option `tickEnabled` is not supported yet.
-
-Typical cause: setting `tickEnabled: true` or `false`.
-
-Fix: remove the option and set tick on the class in the Mod Editor. Writing the saved start-with-tick default has not been verified.
+Retired: `tickEnabled` is supported now (the class-defaults pass writes PrimaryActorTick.bStartWithTickEnabled). abfc no longer reports this code.
 
 ### ABFC2064
 
@@ -871,6 +867,36 @@ Fix: write the value as a plain string literal.
 
 The stubs are the `.d.ts` files `abfc generate` writes from the Mod Editor; the lock file next to them records which editor build and configuration they belong to. These codes mean the stubs are missing, out of date or incomplete. They all exit with 2.
 
+### ABFC2103
+
+Severity: warning · Exit: -
+
+Meaning: `if (!isValid(x))` comes right after `const x = cast(...)`, and its branch does more than `return;`. When the cast fails, the unit ends at the cast; the branch does not run (only a valid object of the wrong class reaches it). `if (!isValid(x)) return;` is not reported: ending the unit does the same thing.
+
+Typical cause: a log line, a counter or a fallback inside `if (!isValid(x)) { ... }` after a cast.
+
+Fix: write `if (!x) { ... }`, which runs the branch when the cast fails. `if (isValid(x)) { ... } else { ... }` runs the else side for a failed cast too.
+
+### ABFC2104
+
+Severity: error · Exit: 1
+
+Meaning: the `interfaces` option of `@blueprint` is not an array literal of interface classes from the stubs, or lists one twice.
+
+Typical cause: `interfaces: I_Interactable_C` without the brackets, a string path, or a class that has no stub.
+
+Fix: write `@blueprint({ interfaces: [I_Interactable_C] })` with the class imported from its stub (run `abfc generate --add <class path>` if there is none).
+
+### ABFC2105
+
+Severity: error · Exit: 1
+
+Meaning: a component field is not written as `Name = component(Class, { Prop: value }, { attachTo: "Other" })`, its class is not an ActorComponent, a property is unknown or has a value a class default cannot hold, the class is not an Actor, or the code assigns the component.
+
+Typical cause: `this.Mesh = ...` on a component field, a misspelled property name, or `component(...)` used outside a field initializer.
+
+Fix: set the component's properties in `component(...)`, change it at run time through its functions (`this.Mesh.SetVisibility(false)`), and keep the call as the field's initializer.
+
 ### ABFC3001
 
 Severity: error in `abfc build` and `abfc publish`, warning in `abfc check` · Exit: 2 (error), - (warning). The generator-version variant is always a warning.
@@ -970,6 +996,16 @@ Meaning: `stubs.widgetMembers` is deprecated. Either an entry is now found by `a
 Typical cause: a config written for an older abfc, before widgets and components of game Blueprints were read from reflection.
 
 Fix: remove the entries named in the warnings; report the members that are still taken from the config.
+
+### ABFC3016
+
+Severity: warning · Exit: -
+
+Meaning: an asset in `stubs.classOnly` is also one abfc builds into (its manifest lists owned units or variables). A class-only stub has no own members, so TypeScript that uses one of its components or functions fails with ABFC2060.
+
+Typical cause: a Blueprint that is mostly baked or hand-made but has its own TypeScript class adding a graph to it, moved into `stubs.classOnly` with the spawn-only ones.
+
+Fix: move the asset back to `stubs.modAssets`. The next `abfc generate` reads it again ("moved out of stubs.classOnly").
 
 ### ABFC3020
 
@@ -1373,6 +1409,16 @@ Typical cause: you renamed or removed the struct, as ABFC2046 suggests for a fie
 
 Fix: delete the struct in the Mod Editor once no Blueprint uses it, or declare it in TypeScript again (nothing else is needed; if you remove it again later, abfc warns again).
 
+### ABFC5019
+
+Severity: error · Exit: 1
+
+Meaning: `protectEditorEdits` is on in abf.config.json and this build would remove or replace work made in the Mod Editor: hand-made nodes, function graphs or variables of a class without a `_Manual` interface merge, a hand-made event or function with a body that has the name of a TypeScript unit, or an edit of nodes abfc built (ABFC5001). The message lists it. Nothing is applied. An empty hand-made override (made only so the build fills it) is not protected.
+
+Typical cause: the Blueprint was changed in the Mod Editor after it was built from TypeScript.
+
+Fix: move the work into the `.ts` file, or keep it by making the class hybrid (`interface X extends X_Manual {}`). To let TypeScript win once, run `abfc build --replace-editor-edits` (the old behaviour: [ABFC5014](#abfc5014) lists what went).
+
 ### ABFC5101
 
 Severity: warning · Exit: -
@@ -1395,7 +1441,7 @@ Fix: run `abfc build` again. The pass is repeated.
 
 ## 6xxx tests
 
-Codes 6001 and 6002 are Unreal compile errors reported after a build applied the Blueprints. 6101-6201 come from `abfc test` and from the test gate of `abfc publish`. They exit with 1 when they are errors. Writing tests is covered in [first-mod.md](first-mod.md).
+Codes 6001 and 6002 are Unreal compile errors reported after a build applied the Blueprints; 6003 is an override that the apply turned into a custom event. 6101-6201 come from `abfc test` and from the test gate of `abfc publish`. They exit with 1 when they are errors. Writing tests is covered in [first-mod.md](first-mod.md).
 
 ### ABFC6001
 
@@ -1416,6 +1462,16 @@ Meaning: Unreal reported a compile error that abfc could not map to a TypeScript
 Typical cause: an error in a node abfc does not own, or a message without a node.
 
 Fix: read the message. For a hand-made node, fix it in the Mod Editor. After a failed compile abfc re-syncs the stage from the mod, so the next build applies your units again; `--keep-failed-stage` keeps the failed stage instead.
+
+### ABFC6003
+
+Severity: error · Exit: 1
+
+Meaning: an `@override` did not come out of the apply as an override event. Unreal made it a custom event named like the parent's function (for example `GunStartFiring_1`), which compiles clean but is never called, so the parent's implementation keeps running. The build fails and the stage is re-synced, so the stray event is never published.
+
+Typical cause: the event is declared in a Blueprint class (a game weapon's `GunStartFiring`), not in native code, and the backend built the node's template in its Actor scratch Blueprint, where the event does not exist. Native events (`ReceiveBeginPlay`, `ReceiveTick`) are not affected.
+
+Fix: apply `backend-override-blueprint-events.patch` to abf-mod-editor-mcp (it templates such an event in a scratch child of the class that declares it), restart the backend and build again. Until then, hand-make the override in the Mod Editor and call a custom `@event` from it.
 
 ### ABFC6101
 
@@ -1466,6 +1522,16 @@ Meaning: a `liveHud` test is skipped, because it needs a live HUD and cannot run
 Typical cause: the test was written with `test.liveHud`.
 
 Fix: nothing is required. abfc lists the test and its checklist in `.abfc/reports/manual-checks.md` for a manual check in Play In Editor. Skipped live tests do not stop `abfc publish`.
+
+### ABFC6106
+
+Severity: warning · Exit: -
+
+Meaning: the backend runs no `until` steps, so `t.waitUntil(...)` waits its whole timeout and then looks once.
+
+Typical cause: the backend lacks the `game_test_until` extension (backend patch `backend-game-test-until.patch`).
+
+Fix: nothing is required: the test still passes when the condition holds at the end of the timeout. A condition that holds only for a moment (a flag that is set and cleared again) needs the patch; apply it and restart the backend.
 
 ### ABFC6201
 

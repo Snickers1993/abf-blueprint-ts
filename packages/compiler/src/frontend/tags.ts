@@ -276,13 +276,29 @@ function literalOfProperty(checker: ts.TypeChecker, type: ts.Type, prop: string)
   if (!sym) return undefined;
   const t = checker.getTypeOfSymbol(sym);
   const members = t.isUnion() ? t.types : [t];
-  const lit = members.find((m): m is ts.StringLiteralType => m.isStringLiteral());
-  return lit?.value;
+  const lits = members.filter((m): m is ts.StringLiteralType => m.isStringLiteral()).map((m) => m.value);
+  // `float` is branded "float" | "double" (a float pin takes a double); it is still a float
+  if (prop === "__bpNumber" && lits.includes("float")) return "float";
+  return lits[0];
 }
 
 /** Union members without null/undefined (a boolean union stays one member). */
 function withoutNullish(checker: ts.TypeChecker, type: ts.Type): ts.Type {
   return checker.getNonNullableType(type);
+}
+
+/** `TSubclassOf<T>` / `TSoftClassPtr<T>` / `TSoftObjectPtr<T>` (alone, or in a union with the class constructor) -> `class:` / `softclass:` / `softobject:`. */
+function classRefType(checker: ts.TypeChecker, t: ts.Type): BpType | undefined {
+  for (const m of t.isUnion() ? t.types : [t]) {
+    for (const [prop, kind] of [["__bpClassOf", "class"], ["__bpSoftClassOf", "softclass"], ["__bpSoftObjectOf", "softobject"]] as const) {
+      const p = checker.getPropertyOfType(m, prop);
+      if (!p) continue;
+      const inner = checker.getNonNullableType(checker.getTypeOfSymbol(p)).getSymbol();
+      const ci = inner ? classInfo(inner) : undefined;
+      if (ci && ci.kind !== "struct" && ci.kind !== "enum") return `${kind}:${ci.path}`;
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -313,6 +329,8 @@ export function bpTypeOf(checker: ts.TypeChecker, type: ts.Type): BpType | undef
   const en = literalOfProperty(checker, t, "__bpEnum");
   if (en !== undefined) return `enum:${en}`;
   if (t.flags & ts.TypeFlags.StringLike) return "string";
+  const ref = classRefType(checker, t);
+  if (ref !== undefined) return ref;
   const sym = t.getSymbol();
   if (sym) {
     const ci = classInfo(sym);

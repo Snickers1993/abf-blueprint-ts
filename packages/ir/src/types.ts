@@ -21,10 +21,15 @@ export interface IrAsset {
   classManagerRow?: string;
   /** `@director("Row")`: the class-manager row asset (`/<mod>/<table>/<Row>`) that should reference this class. */
   director?: { row: string; asset: string; /** The gameplay tag the row holds (`@director("Row", tag)`). */ tag?: string };
+  /** Class paths of the Blueprint interfaces the asset implements (`@blueprint({ interfaces })`); added before the graphs are applied. */
+  interfaces?: string[];
+  /** Components the asset owns (`Name = component(Class, ...)`): created or updated before the graphs; props are field-default JSON values. */
+  components?: IrComponent[];
   variables: IrVariable[];
   units: IrUnit[]; // owned functions/events/overrides
   structFields?: IrVariable[]; // only for UserDefinedStruct
 }
+export interface IrComponent { name: string; class: string; attachTo?: string; props: Record<string, unknown>; origin: Span }
 export interface IrVariable { name: string; type: IrType; default?: string; flags: VarFlag[]; origin: Span; temp?: boolean }
 export interface IrParam { name: string; type: IrType }
 export interface IrUnit {
@@ -32,7 +37,7 @@ export interface IrUnit {
   kind: "function" | "event" | "override";
   name: string;
   graph: string; // "EventGraph" for events, the function name for functions
-  signature: { inputs: IrParam[]; outputs: IrParam[]; net?: "server" | "client" | "multicast"; reliable?: boolean; /** Functions only: the Blueprint access specifier. */ access?: "public" | "protected" | "private" };
+  signature: { inputs: IrParam[]; outputs: IrParam[]; net?: "server" | "client" | "multicast"; reliable?: boolean; /** Functions only: the Blueprint access specifier. */ access?: "public" | "protected" | "private"; /** Functions only: the class path of the parent that declares the function this graph overrides. */ override?: string };
   locals: IrVariable[]; // honored when the backend has functionLocals; else hoisted by the lowering
   nodes: IrNode[];
   wires: IrWire[];
@@ -128,6 +133,10 @@ export interface BackendCapabilities {
   variableDefaults: boolean;
   /** bp_apply feature `function_graphs`: own functions with access flags and same-name replace. */
   functionGraphs: boolean;
+  /** bp_apply feature `interfaces`: an asset spec may list Blueprint interfaces to implement. */
+  interfaces: boolean;
+  /** bp_apply feature `components`: an asset spec may list components to create or update. */
+  components: boolean;
   bpApplyFeatures: string[];
   nodeKinds: string[];
   /** `mod_audit` can audit the stage (false in Phase 1: it audits the real mod). */
@@ -199,6 +208,10 @@ export interface AssetPlan {
   variables: IrVariable[];
   units: Array<{ unit: IrUnit; removeNodes: string[]; origin: [number, number] }>;
   classMeta: Record<string, string>;
+  /** Blueprint interfaces the asset implements (bp_apply feature `interfaces`): the backend adds the missing ones before the graphs. */
+  interfaces?: string[];
+  /** Components (bp_apply feature `components`): missing ones are created, all get their props set, before the graphs. */
+  components?: IrComponent[];
   /** Real entry node name of units that are not in this plan but are the target of a cross wire of a planned unit (from the manifest). */
   entryNames?: Record<string, string>;
   /** Manifest units no longer in the TS whose stage nodes are removed (nodes include the tag comment). */
@@ -213,8 +226,10 @@ export interface AssetPlan {
   removeVariables?: string[];
   /** Own fields declared in the asset whose TS default differs from the manifest: the new text, or null to drop the default. */
   variableDefaults?: Record<string, string | null>;
+  /** `variableDefaults` holds every own field's default again: the stage was re-synced (or saved in the Mod Editor) since they were last applied and not published. */
+  variablesResynced?: true;
   /** Function graphs to create (signature only; the body comes in graphs). A name also in removeFunctions is replaced. */
-  functions?: Array<{ name: string; inputs: IrParam[]; outputs: IrParam[]; access: "public" | "protected" | "private" }>;
+  functions?: Array<{ name: string; inputs: IrParam[]; outputs: IrParam[]; access: "public" | "protected" | "private"; /** Overrides the parent function of this name (class path of its declaring class). */ override?: string }>;
   /** TS wins: hand-made function graphs removed from a non-hybrid class. */
   removeFunctions?: string[];
   /** Own fields gone from the TS that were not in the asset any more: only the manifest record is dropped. */
@@ -224,6 +239,16 @@ export interface AssetPlan {
 }
 export interface ApplyPlan { mod: string; assets: AssetPlan[] }
 
-export interface TestStepRecord { step: Record<string, unknown>; span: Span; knownIssue?: string }
+/** `note`: the label of a `t.note(label, v)` step, whose value the runner prints whether the test passes or not. */
+export interface TestStepRecord { step: Record<string, unknown>; span: Span; knownIssue?: string; note?: string }
 /** `liveHud`: the test needs the live HUD (not available hidden); it is skipped and listed with its manual `checklist`. */
-export interface TestCase { name: string; file: string; span: Span; steps: TestStepRecord[]; liveHud?: { checklist: string[] } }
+/** `map`/`timeoutSeconds`: `test(name, { map, timeout }, body)` runs on that map (default the backend's empty map) with that run timeout. */
+export interface TestCase {
+  name: string;
+  file: string;
+  span: Span;
+  steps: TestStepRecord[];
+  liveHud?: { checklist: string[] };
+  map?: string;
+  timeoutSeconds?: number;
+}

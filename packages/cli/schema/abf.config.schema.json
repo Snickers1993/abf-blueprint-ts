@@ -63,6 +63,11 @@
             { "type": "array", "items": { "type": "string" } }
           ]
         },
+        "classOnly": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Mod-relative Blueprints (such as \"Rooms/BP_Section\") stubbed as the class and its parent only, without own members: read once, then kept when their files change (a room bake), so they cost abfc generate nothing. For Blueprints the TypeScript only spawns or names, or uses through inherited members."
+        },
         "widgetMembers": {
           "type": "object",
           "description": "Deprecated: members are found by abfc generate. Designer widgets of widget Blueprints that cannot be read from an export: class path to { member name: widget class path }.",
@@ -119,6 +124,10 @@
     "modsDir": {
       "type": "string",
       "description": "Machine-specific folder that holds the mods. Put it in the user config."
+    },
+    "protectEditorEdits": {
+      "type": "boolean",
+      "description": "true: abfc build refuses (ABFC5019) to remove or replace what was made by hand in the Mod Editor; abfc build --replace-editor-edits lets one build do it. Default false (TypeScript wins, ABFC5014 warning)."
     }
   }
 }

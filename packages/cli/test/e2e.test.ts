@@ -1,7 +1,7 @@
 // CLI end-to-end on the step 23 fixture project (a synthetic mod, TestMod) against the in-memory fake backend.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join, win32 } from "node:path";
 import type { ReflectData, ReflectRequest } from "@abfc/backend";
 import { buildHir, compileTests, loadProgram, lower, readManifest, readRetired, readSourceMap, writeManifest } from "@abfc/compiler";
@@ -281,6 +281,38 @@ test("(b1p) a published unit that is changed and fails to compile keeps the entr
   });
 });
 
+test("(b1v) an unpublished build, then a re-sync from the mod: the published event stays abfc's and is replaced, never kept as hand-made", async () => {
+  await withRig({ handMadeEvent: false }, async (r) => {
+    let x = await r.run(["build"]);
+    assert.equal(x.code, 0, x.out);
+    x = await r.run(["publish"]);
+    assert.equal(x.code, 0, x.out);
+    r.backend.markPublished();
+    const publishedNodes = readManifest(r.dir, RELAY_ASSET)!.units[0]!.nodes;
+    assert.ok(existsSync(join(r.dir, ".abfc", "published")), "the publish kept a copy of the manifests");
+
+    // a changed unit is built (new node names) but not published
+    const src = join(r.dir, "src", "Relay.ts");
+    writeFileSync(src, readFileSync(src, "utf8").replace("const rowName = Lib.RowToName(pot.Row);", "const rowName = Lib.RowToName(pot.Row); this.LastName = rowName;"), "utf8");
+    x = await r.run(["build"]);
+    assert.equal(x.code, 0, x.out);
+    assert.notDeepEqual(readManifest(r.dir, RELAY_ASSET)!.units[0]!.nodes, publishedNodes);
+
+    // the stage is copied from the mod again (a script saved other assets, a publish failed): it holds the published nodes
+    x = await r.run(["build", "--resync"]);
+    assert.equal(x.code, 0, x.out);
+    assert.doesNotMatch(x.out, /ABFC500[23]|hand-made/);
+    assert.match(x.out, /applied UpdateTarget/);
+    const held = r.backend.nodeNames(RELAY_ASSET);
+    const unit = readManifest(r.dir, RELAY_ASSET)!.units;
+    assert.equal(unit.length, 1);
+    assert.ok(unit[0]!.nodes.every((n) => held.includes(n)));
+    assert.ok(publishedNodes.every((n) => !held.includes(n) || unit[0]!.nodes.includes(n)), "the published nodes were replaced, not kept beside the new ones");
+    x = await r.run(["build"]);
+    assert.match(x.out, /up to date/);
+  });
+});
+
 test("(b1q) a stage read that fails after the re-sync does not drop the units of that asset", async () => {
   await withRig({ handMadeEvent: false }, async (r) => {
     let x = await r.run(["build"]);
@@ -293,7 +325,8 @@ test("(b1q) a stage read that fails after the re-sync does not drop the units of
     writeFileSync(src, readFileSync(src, "utf8").replace("const rowName = Lib.RowToName(pot.Row);", "const rowName = Lib.RowToName(pot.Row); this.LastName = rowName;"), "utf8");
     r.backend.reportMessages = [{ severity: "error", asset: RELAY_ASSET, message: "boom" }];
     r.backend.failReadsAfterResync = true;
-    x = await r.run(["build"]);
+    // --full: no read cache, so the read after the re-sync really goes to the (failing) backend
+    x = await r.run(["build", "--full"]);
     assert.notEqual(x.code, 0, x.out);
     const after = readManifest(r.dir, RELAY_ASSET)!.units;
     assert.equal(after.length, before.length, "the units are not dropped when the stage cannot be read");
@@ -921,7 +954,7 @@ test("(g2) a stage re-synced from a published mod that holds the built graphs: r
   });
 });
 
-test("(h) native pin types: one main bp_apply call, no phase B, no pin_types on casts; doctor says native", async () => {
+test("(h) native pin types: one main bp_apply call (comment boxes included), no phase B, no pin_types on casts; doctor says native", async () => {
   await withRig({ backendInfo: true, handMadeEvent: false }, async (r) => {
     let x = await r.run(["doctor"]);
     assert.equal(x.code, 0, x.out);
@@ -931,7 +964,7 @@ test("(h) native pin types: one main bp_apply call, no phase B, no pin_types on 
     assert.equal(x.code, 0, x.out);
     assert.doesNotMatch(x.out, /ABFC4012/);
     assert.match(x.out, /\(route: native\)/);
-    assert.deepEqual(r.backend.applyLabels(), ["main", "tags"]);
+    assert.deepEqual(r.backend.applyLabels(), ["main"], "the comment boxes go in the main call");
     const main0 = r.backend.calls.find((c) => c.label === "main")!.specs![0]!;
     const nodes: Array<Record<string, any>> = main0.graphs[0].add;
     assert.equal(nodes.filter((n) => n.k === "cast").length, 2);
@@ -1838,6 +1871,43 @@ test("(A8-2) a hand-made event, variable and function graph on a non-hybrid asse
     x = await r.run(["build", "--drift"]);
     assert.equal(x.code, 0, x.out);
     assert.doesNotMatch(x.out, /ABFC5014/);
+  });
+});
+
+test("(A8-2p) protectEditorEdits: a build that would remove hand-made work refuses (ABFC5019) and applies nothing; --replace-editor-edits lets it", async () => {
+  await withRig({}, async (r) => {
+    rmSync(join(r.dir, "src", "Relay.ts"));
+    rmSync(join(r.dir, "src", "Relay.test.ts"));
+    writeFileSync(join(r.dir, "src", "Tally.ts"), TALLY, "utf8");
+    const cfgFile = join(r.dir, "abf.config.json");
+    writeFileSync(cfgFile, JSON.stringify({ ...JSON.parse(readFileSync(cfgFile, "utf8")), protectEditorEdits: true }), "utf8");
+    let x = await r.run(["build"]);
+    assert.equal(x.code, 0, x.out);
+
+    const handNodes = r.backend.addHandMadeEvent(TALLY_ASSET, "MyOwnEvent");
+    r.backend.addHandMadeVariable(TALLY_ASSET, "Mine", "int");
+    r.backend.addHandMadeFunction(TALLY_ASSET, "HandFn");
+    const before = appliedSpecs(r).length;
+
+    x = await r.run(["build", "--drift"]);
+    assert.equal(x.code, 1, x.out);
+    assert.match(x.out, /error ABFC5019/);
+    assert.match(x.out, /HandFn/);
+    assert.match(x.out, /Mine/);
+    assert.equal(appliedSpecs(r).length, before, "nothing was applied");
+    const held = r.backend.nodeNames(TALLY_ASSET);
+    for (const n of handNodes) assert.ok(held.includes(n), `${n} is still on the stage`);
+    assert.deepEqual(r.backend.functionNames(TALLY_ASSET), ["HandFn"]);
+
+    // one build may replace it (TypeScript wins, the old ABFC5014 warning)
+    x = await r.run(["build", "--drift", "--replace-editor-edits"]);
+    assert.equal(x.code, 0, x.out);
+    assert.match(x.out, /warning ABFC5014/);
+    assert.deepEqual(r.backend.functionNames(TALLY_ASSET), []);
+
+    // nothing left to protect: a plain build passes again
+    x = await r.run(["build", "--drift"]);
+    assert.equal(x.code, 0, x.out);
   });
 });
 
@@ -2838,4 +2908,39 @@ test("(s7) the backend cannot start at the start of a build: ABFC3020 once with 
     assert.match(x.out, /ABFC2000/, "the build went on to the frontend");
     assert.doesNotMatch(x.out, /ABFC3003|ABFC3001/, "the existing stubs are usable");
   });
+});
+
+test("(h2) test options and waitUntil: map and timeout reach bp_game_test; without game_test_until the wait degrades with ABFC6106", async () => {
+  const body = [
+    'import { test } from "@abfc/testkit";',
+    'import { BP_Relay } from "./Relay.js";',
+    "",
+    'test("relay settles", { map: "/Game/Maps/Facility", timeout: 400 }, (t) => {',
+    "  const a = t.find(BP_Relay, { timeout: 60 });",
+    "  const b = t.spawn(BP_Relay);",
+    "  a.moveTo(0, 0, 100);",
+    '  b.call("UpdateTarget");',
+    '  t.waitUntil(b.get("Visible"), { timeout: 4 }).equals(false);',
+    "  t.expect(t.distance(a, b)).below(5000);",
+    '  t.note("where", t.distance(a, b));',
+    "});",
+    "",
+  ].join("\n");
+  for (const until of [false, true]) {
+    await withRig(until ? { handMadeEvent: false, extraFeatures: ["game_test_until"] } : { handMadeEvent: false }, async (r) => {
+      assert.equal((await r.run(["build"])).code, 0);
+      rmSync(join(r.dir, "src", "Relay.test.ts"));
+      writeFileSync(join(r.dir, "src", "Settle.test.ts"), body, "utf8");
+      const x = await r.run(["test", "--no-build"]);
+      assert.equal(x.code, 0, x.out);
+      assert.match(x.out, /PASS relay settles \(8\/8/);
+      assert.match(x.out, /note src\/Settle\.test\.ts:11 where: null/);
+      assert.equal(/warning ABFC6106/.test(x.out), !until, x.out);
+      assert.equal(r.backend.gameTestRuns.length, 1);
+      const run = r.backend.gameTestRuns[0]!;
+      assert.deepEqual(run.o, { timeoutSeconds: 400, map: "/Game/Maps/Facility" });
+      const ops = run.steps.map((s) => (s as { op: string }).op);
+      assert.deepEqual(ops, until ? ["find", "spawn", "python", "call", "until", "python", "assert", "python"] : ["find", "spawn", "python", "call", "wait", "get", "assert", "python", "python", "python"]);
+    });
+  }
 });

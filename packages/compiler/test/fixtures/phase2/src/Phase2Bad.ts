@@ -55,6 +55,6 @@ declare const BAD_FREQ: number;
   alwaysRelevant: true, // ABFC2062 @alwaysRelevant
   netUpdateFrequency: BAD_FREQ, // ABFC2061 @BAD_FREQ
   tickInterval: 0.5, // ABFC2062 @tickInterval
-  tickEnabled: false, // ABFC2063 @tickEnabled
+  tickEnabled: false, // ABFC2062 @tickEnabled
 })
 export class BP_BadDefaults extends FakeWidget {}

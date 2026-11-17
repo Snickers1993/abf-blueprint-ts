@@ -146,6 +146,15 @@ function rowList(v: unknown): BpApplyResult["rows"] {
   return out;
 }
 
+/**
+ * Seconds the hidden mod audit may run. It reads every asset of the staged mod: 420 s was too short for a mod of about 900
+ * assets (killed after 7 minutes, no verdict). `ABFC_AUDIT_TIMEOUT_SECONDS` overrides the default of 1800.
+ */
+export function auditTimeoutSeconds(env: Record<string, string | undefined> = process.env): number {
+  const v = Number(env["ABFC_AUDIT_TIMEOUT_SECONDS"]);
+  return Number.isFinite(v) && v >= 60 ? Math.round(v) : 1800;
+}
+
 export class BpApplyBackend implements Backend {
   private readonly client: McpStdioClient;
   private readonly serverDir: string;
@@ -399,12 +408,12 @@ export class BpApplyBackend implements Backend {
     return { run: str(json.run) ?? "", seconds: num(json.seconds), file, data, warm: this.lastWarm };
   }
 
-  async gameTest(mod: string, steps: unknown[], o: { timeoutSeconds: number }): Promise<GameTestReport> {
+  async gameTest(mod: string, steps: unknown[], o: { timeoutSeconds: number; map?: string }): Promise<GameTestReport> {
     this.warmStarted = false; // the game test runs cold and stops a running warm session first
     this.lastWarm = false;
     const { json } = await this.call(
       "bp_game_test",
-      { mod, steps, timeout_seconds: o.timeoutSeconds },
+      o.map === undefined ? { mod, steps, timeout_seconds: o.timeoutSeconds } : { mod, steps, timeout_seconds: o.timeoutSeconds, map: o.map },
       { tolerate: (j) => Array.isArray(j.steps) },
     );
     const stepList = Array.isArray(json.steps) ? json.steps : [];
@@ -442,7 +451,7 @@ export class BpApplyBackend implements Backend {
     this.lastWarm = false;
     const { json } = await this.call(
       "mod_audit",
-      { mod, timeout_seconds: 420 },
+      { mod, timeout_seconds: auditTimeoutSeconds() },
       { tolerate: (j) => typeof j.ok === "boolean" },
     );
     return { ok: json.ok === true, raw: json, seconds: num(json.seconds) };

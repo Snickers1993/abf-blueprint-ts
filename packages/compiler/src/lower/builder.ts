@@ -54,11 +54,58 @@ interface LoopCtx {
 
 const REAL_TYPES = new Set(["float", "double", "real"]);
 
+const MATH_LIBRARY = "/Script/Engine.KismetMathLibrary";
+/**
+ * Struct literals of core math structs lower to their native make functions instead of a Make Struct node, which the
+ * editor refuses on them ("is not a BlueprintType"). Fields left out of the literal get `fill` (default 0).
+ */
+const NATIVE_MAKE: Readonly<Record<string, { fn: string; pins: readonly string[]; fill?: string }>> = {
+  "/Script/CoreUObject.Vector": { fn: "MakeVector", pins: ["X", "Y", "Z"] },
+  "/Script/CoreUObject.Vector2D": { fn: "MakeVector2D", pins: ["X", "Y"] },
+  "/Script/CoreUObject.Rotator": { fn: "MakeRotator", pins: ["Roll", "Pitch", "Yaw"] },
+};
+/**
+ * Pin default text of a core math struct literal whose fields are all number literals, in the struct's text order:
+ * a Vector pin reads "X,Y,Z" and a Rotator pin "Pitch,Yaw,Roll" (as the editor writes them). Such a literal fed straight
+ * into a pin needs no make node; a missing field is 0.
+ */
+const LITERAL_STRUCT_ORDER: Readonly<Record<string, readonly string[]>> = {
+  "/Script/CoreUObject.Vector": ["X", "Y", "Z"],
+  "/Script/CoreUObject.Vector2D": ["X", "Y"],
+  "/Script/CoreUObject.Rotator": ["Pitch", "Yaw", "Roll"],
+};
+/**
+ * A game row handle (a native struct of a game module, not Engine or CoreUObject, whose name ends in RowHandle, e.g. a world-flag
+ * row handle). The game's are not BlueprintType, so a Make Struct node on one is refused; a literal `{ RowName: "Row" }` fed straight
+ * into a pin is the pin's own default `(RowName="Row")`, exactly what picking the row in the pin's dropdown writes.
+ */
+const ROW_HANDLE_RE = /^\/Script\/(?!Engine\.|CoreUObject\.)[A-Za-z0-9_]+\.[A-Za-z0-9_]*RowHandle$/;
+export function structLiteralText(e: HirExpr): string | undefined {
+  if (e.k !== "makeStruct") return undefined;
+  if (ROW_HANDLE_RE.test(e.struct)) {
+    const f = e.fields.length === 1 ? e.fields[0]! : undefined;
+    if (!f || f.name !== "RowName") return undefined;
+    const v = f.value;
+    const text = v.k === "nameLit" ? v.text : v.k === "lit" && typeof v.value === "string" ? v.value : undefined;
+    // the pin default is written verbatim inside DefaultValue="...", so the struct text's own quotes are escaped (as the editor exports it)
+    return text === undefined ? undefined : escapeT3dString(`(RowName="${text}")`);
+  }
+  const order = LITERAL_STRUCT_ORDER[e.struct];
+  if (!order) return undefined;
+  const vals: Record<string, number> = {};
+  for (const f of e.fields) {
+    if (f.value.k !== "lit" || typeof f.value.value !== "number" || !order.includes(f.name)) return undefined;
+    vals[f.name] = f.value.value;
+  }
+  return order.map((n) => (vals[n] ?? 0).toFixed(6)).join(",");
+}
 const ARITH_NAMES = { "+": "Add", "-": "Subtract", "*": "Multiply", "/": "Divide" } as const;
 const CMP_NAMES = { "<": "Less", "<=": "LessEqual", ">": "Greater", ">=": "GreaterEqual" } as const;
 const K2_EVENT = "/Script/BlueprintGraph.K2Node_Event";
 const K2_CREATE_WIDGET = "/Script/UMGEditor.K2Node_CreateWidget";
 const K2_SPAWN_ACTOR = "/Script/BlueprintGraph.K2Node_SpawnActorFromClass";
+/** Get <Subsystem> (pure); its class is the CustomClass property, its output pin ReturnValue (verified on a hand-made WorldFlagSubsystem node). */
+const K2_GET_SUBSYSTEM = "/Script/BlueprintGraph.K2Node_GetSubsystem";
 /** Engine function libraries of native Map and Set operations (pin names verified against exports of the Mod Editor). */
 const MAP_LIBRARY = "/Script/Engine.BlueprintMapLibrary";
 const SET_LIBRARY = "/Script/Engine.BlueprintSetLibrary";
@@ -118,7 +165,7 @@ function exits(list: HirStmt[]): boolean {
 function valueReturns(list: HirStmt[]): number {
   let n = 0;
   for (const s of list) {
-    if (s.k === "return") n += s.value !== undefined ? 1 : 0;
+    if (s.k === "return") n += s.value !== undefined || s.outs !== undefined ? 1 : 0;
     else if (s.k === "if") n += valueReturns(s.then) + valueReturns(s.else);
     else if (s.k === "forOf" || s.k === "forCount") n += valueReturns(s.body);
   }
@@ -148,11 +195,13 @@ export class UnitBuilder {
   private params = new Map<string, string>();
   private entryId = "";
   private tempCount = 0;
+  /** Consts bound to a live pure value that reads state (not stored in a temp): a const built from them reads state too. */
+  private unstable = new Set<LocalId>();
   private loopCount = 0;
   /** Functions: the only value `return` is the last top-level statement, so its value can feed the result node directly. */
   private directReturn = false;
   /** Functions: the return temp `abfc_<name>_r` exists and is read by the result node. */
-  private returnTemp = false;
+  private returnTemps = new Set<string>();
   private readonly cross: NonNullable<IrUnit["crossWires"]> = [];
 
   constructor(
@@ -168,7 +217,7 @@ export class UnitBuilder {
       // no entry node is emitted: the backend's function entry and result nodes are addressed by the reserved ids `entry` and `result`
       this.entryId = "entry";
       const last = ev.body[ev.body.length - 1];
-      this.directReturn = valueReturns(ev.body) === 1 && last !== undefined && last.k === "return" && last.value !== undefined;
+      this.directReturn = valueReturns(ev.body) === 1 && last !== undefined && last.k === "return" && (last.value !== undefined || last.outs !== undefined);
     } else if (ev.kind === "override") {
       if (ev.overrideOf === undefined) throw new Error(`ABFC2060: override ${ev.name} has no declaring class`);
       const sem: SemanticTag = { k: "override", class: ev.overrideOf, function: ev.name };
@@ -191,8 +240,9 @@ export class UnitBuilder {
       graph: ev.kind === "function" ? ev.name : "EventGraph",
       signature: {
         inputs: ev.params.map((p) => ({ name: p.name, type: p.type })),
-        outputs: ev.kind === "function" && ev.returnType !== undefined ? [{ name: FUNCTION_RETURN_PIN, type: ev.returnType }] : [],
+        outputs: ev.kind !== "function" ? [] : ev.outputs !== undefined ? ev.outputs.map((o) => ({ name: o.name, type: o.type })) : ev.returnType !== undefined ? [{ name: FUNCTION_RETURN_PIN, type: ev.returnType }] : [],
         ...(ev.kind === "function" ? { access: ev.access ?? "public" } : {}),
+        ...(ev.kind === "function" && ev.overrideOf !== undefined ? { override: ev.overrideOf } : {}),
       },
       locals: [],
       nodes: this.nodes,
@@ -301,7 +351,10 @@ export class UnitBuilder {
     }
     if (e.k === "enumLit") return { lit: e.text, nulls: [] };
     if (e.k === "nameLit") return { lit: escapeT3dString(e.text), nulls: [] };
+    const structLit = structLiteralText(e);
+    if (structLit !== undefined) return { lit: structLit, nulls: [] };
     if (e.k === "classRef") return { obj: e.path, nulls: [] };
+    if (e.k === "assetRef") return { obj: e.text, nulls: [] };
     if (e.k === "delegateRef") return { delegate: e.event, nulls: [] };
     const v = this.value(e);
     return { pin: v.pin, nulls: v.nulls };
@@ -311,7 +364,10 @@ export class UnitBuilder {
   private feed(o: Operand, id: string, pin: string, defaults: Record<string, string>, objects?: Record<string, string>): void {
     if (o.pin !== undefined) this.link(o.pin, `${id}.${pin}`);
     else if (o.lit !== undefined) defaults[pin] = o.lit;
-    else if (o.obj !== undefined && objects) objects[pin] = o.obj;
+    else if (o.obj !== undefined) {
+      if (!objects) throw new Error(`ABFC2099: a class or asset reference cannot feed ${pin} here; pass it to a call or assign it to a variable`);
+      objects[pin] = o.obj;
+    }
     else if (o.delegate !== undefined) this.cross.push({ toUnit: `event:${o.delegate}`, from: `${ENTRY_ID}.OutputDelegate`, to: `${id}.${pin}` });
   }
 
@@ -356,6 +412,13 @@ export class UnitBuilder {
       case "lit":
         return this.unsupported("a literal in this position", e.span);
       case "getSelf":
+        if (e.owner !== undefined) {
+          // Target = a Self node: Unreal's compile refuses the other-context get with its Target unwired ("invalid target")
+          const id = this.emit("get", this.profile.nodeClasses.variableGet, [this.varRef(e.name, e.owner)], { k: "get", name: e.name, class: e.owner }, e.span);
+          const me = this.emit("self", "/Script/BlueprintGraph.K2Node_Self", [], { k: "self" }, e.span);
+          this.link(`${me}.${this.profile.pins.self}`, `${id}.${this.profile.pins.self}`);
+          return { pin: `${id}.${e.name}`, nulls: [] };
+        }
         return { pin: this.getVar(e.name, e.span), nulls: [] };
       case "getOn": {
         const src = this.value(e.obj);
@@ -456,20 +519,30 @@ export class UnitBuilder {
         this.settle(id, defaults);
         return { pin: `${id}.${P.returnValue}`, nulls: owner?.nulls ?? [] };
       }
+      case "subsystem": {
+        const id = this.emit("subsys", K2_GET_SUBSYSTEM, [`CustomClass="${pinObjectText("class", e.cls, this.classMeta)}"`], undefined, e.span);
+        return { pin: `${id}.${P.returnValue}`, nulls: [] };
+      }
       case "spawn": {
         const owner = e.owner ? this.optOperand(e.owner) : undefined;
-        const mk = this.pureCall(this.profile.functions.addInt.class, "MakeTransform", e.span, {
-          pinDefaults: { Location: "0, 0, 0", Rotation: "0, 0, 0", Scale: "1.000000,1.000000,1.000000" },
-        });
+        const instigator = e.instigator ? this.optOperand(e.instigator) : undefined;
+        const where = e.transform ? this.operand(e.transform) : undefined;
+        const mk = where
+          ? undefined
+          : this.pureCall(this.profile.functions.addInt.class, "MakeTransform", e.span, {
+              pinDefaults: { Location: "0, 0, 0", Rotation: "0, 0, 0", Scale: "1.000000,1.000000,1.000000" },
+            });
         const defaults: Record<string, string> = {};
         if (e.collision !== undefined) defaults.CollisionHandlingOverride = e.collision;
         if (e.scale !== undefined) defaults.TransformScaleMethod = e.scale;
         const id = this.emit("spawn", K2_SPAWN_ACTOR, [], { k: "spawn" }, e.span, { pinObjects: { Class: e.cls } });
         this.execInto(id);
-        this.link(`${mk}.${P.returnValue}`, `${id}.SpawnTransform`);
+        if (where) this.feed(where, id, "SpawnTransform", defaults);
+        else this.link(`${mk}.${P.returnValue}`, `${id}.SpawnTransform`);
         if (owner) this.feed(owner, id, "Owner", defaults);
+        if (instigator) this.feed(instigator, id, "Instigator", defaults);
         this.settle(id, defaults);
-        return { pin: `${id}.${P.returnValue}`, nulls: owner?.nulls ?? [] };
+        return { pin: `${id}.${P.returnValue}`, nulls: [...(owner?.nulls ?? []), ...(instigator?.nulls ?? []), ...(where?.nulls ?? [])] };
       }
       case "arith":
       case "cmp": {
@@ -550,6 +623,26 @@ export class UnitBuilder {
         const nulls: Exit[] = [];
         const ops = e.fields.map((a) => ({ a, o: this.operand(a.value, a.value.type === "void" || a.value.type === "null" ? undefined : a.value.type) }));
         for (const x of ops) nulls.push(...x.o.nulls);
+        if (ROW_HANDLE_RE.test(e.struct)) {
+          return this.unsupported(
+            `a ${shortName(e.struct)} built from values (it is not a BlueprintType, so it has no Make node); pass { RowName: "Row" } with a literal straight to the pin, or convert a name with the game's Conv_NameTo... function`,
+            e.span,
+          );
+        }
+        const native = NATIVE_MAKE[e.struct];
+        if (native) {
+          // core math structs are not BlueprintType: the editor refuses a Make Struct node on them, so use their native make
+          const id = this.pureCall(MATH_LIBRARY, native.fn, e.span);
+          const defaults: Record<string, string> = {};
+          for (const pin of native.pins) defaults[pin] = native.fill ?? "0.0";
+          for (const x of ops) {
+            if (!native.pins.includes(x.a.name)) this.unsupported(`field ${x.a.name} of ${shortName(e.struct)}`, e.span);
+            delete defaults[x.a.name];
+            this.feed(x.o, id, x.a.name, defaults);
+          }
+          this.settle(id, defaults);
+          return { pin: `${id}.${P.returnValue}`, nulls };
+        }
         const id = this.emit("mk", this.profile.nodeClasses.makeStruct,
           ["bMadeAfterOverridePinRemoval=True", `StructType="${pinObjectText("struct", e.struct, this.classMeta)}"`], undefined, e.span);
         const defaults: Record<string, string> = {};
@@ -562,6 +655,7 @@ export class UnitBuilder {
       case "or":
       case "execIs":
       case "classRef":
+      case "assetRef":
       case "delegateRef":
       case "enumLit":
       case "nameLit":
@@ -588,7 +682,9 @@ export class UnitBuilder {
     const sem: SemanticTag = e.owner === null
       ? { k: "call", function: e.name }
       : { k: "call", class: e.owner, function: e.name };
-    const id = this.emit("call", this.profile.nodeClasses.callFunction, props, sem, e.span);
+    const nodeClass = e.parentCall ? "/Script/BlueprintGraph.K2Node_CallParentFunction" : e.message ? "/Script/BlueprintGraph.K2Node_Message" : this.profile.nodeClasses.callFunction;
+    // a parent call or an interface message is a raw node (bp_apply has no kind for it): no semantic tag
+    const id = this.emit("call", nodeClass, props, e.parentCall || e.message ? undefined : sem, e.span);
     if (!e.pure) this.execInto(id);
     if (target) this.link(target.pin, `${id}.${P.self}`);
     for (const f of fed) this.feed(f.o, id, f.pin, defaults, objects);
@@ -623,22 +719,23 @@ export class UnitBuilder {
 
   // ---- conditions ----
 
-  private cond(e: HirExpr, from: Exit[]): { t: Exit[]; f: Exit[] } {
+  /** `negated`: under a `!` (or inside the operand of one), where `isValid(castResult)` keeps its old shape (see the isValid case). */
+  private cond(e: HirExpr, from: Exit[], negated = false): { t: Exit[]; f: Exit[] } {
     const P = this.profile.pins;
     this.cur = from;
     switch (e.k) {
       case "and": {
-        const a = this.cond(e.a, from);
-        const b = this.cond(e.b, a.t);
+        const a = this.cond(e.a, from, negated);
+        const b = this.cond(e.b, a.t, negated);
         return { t: b.t, f: [...a.f, ...b.f] };
       }
       case "or": {
-        const a = this.cond(e.a, from);
-        const b = this.cond(e.b, a.f);
+        const a = this.cond(e.a, from, negated);
+        const b = this.cond(e.b, a.f, negated);
         return { t: [...a.t, ...b.t], f: b.f };
       }
       case "not": {
-        const r = this.cond(e.e, from);
+        const r = this.cond(e.e, from, !negated);
         return { t: r.f, f: r.t };
       }
       case "local": {
@@ -659,6 +756,14 @@ export class UnitBuilder {
         return e.negate ? { t: f, f: t } : { t, f };
       }
       case "isValid": {
+        // `isValid(x)` on a cast result right after the cast: the failed cast is the false side (as for `if (x)`), so the else path
+        // runs when the cast fails. Without this the Cast Failed pin stayed unwired and a failed cast silently ended the unit.
+        // `!isValid(x)` keeps its old graph (a failed cast still ends the unit): in the usual `if (!isValid(x)) return;` that is the
+        // same behaviour, and published Blueprints built from it must not change; the frontend warns (ABFC2089) when it is not.
+        if (e.value.k === "local" && !negated) {
+          const l = this.local(e.value.id);
+          if (l.pendingNull !== undefined) return this.cond(e.value, from);
+        }
         const v = this.value(e.value);
         const br = this.branch(this.isValidCall(v.pin, e.span), undefined, e.span);
         return { t: [`${br}.${P.then}`], f: [...v.nulls, `${br}.${P.else}`] };
@@ -687,14 +792,48 @@ export class UnitBuilder {
         if (v.nulls.length > 0) this.cur = [...this.cur, ...v.nulls];
         return;
       }
+      case "bind": {
+        // what a hand-made "Bind Event to <Dispatcher>" is: Add Delegate (Target = source) fed by Create Event (Target = target)
+        const src = this.value(s.source);
+        const tgt = s.target === null ? null : this.value(s.target);
+        let cd: string | null = null;
+        if (tgt !== null) {
+          cd = this.emit("cdlg", "/Script/BlueprintGraph.K2Node_CreateDelegate", [`SelectedFunctionName="${s.fn}"`], undefined, s.span);
+          this.link(tgt.pin, `${cd}.${P.self}`);
+        }
+        const ad = this.emit("adlg", "/Script/BlueprintGraph.K2Node_AddDelegate",
+          [`DelegateReference=(MemberParent="${pinObjectText("object", s.sourceClass, this.classMeta)}",MemberName="${s.dispatcher}")`], undefined, s.span);
+        this.execInto(ad);
+        this.link(src.pin, `${ad}.${P.self}`);
+        if (cd !== null) this.link(`${cd}.OutputDelegate`, `${ad}.Delegate`);
+        else this.cross.push({ toUnit: `event:${s.fn}`, from: `${ENTRY_ID}.OutputDelegate`, to: `${ad}.Delegate` });
+        const nulls = [...src.nulls, ...(tgt?.nulls ?? [])];
+        if (nulls.length > 0) this.cur = [...this.cur, ...nulls];
+        return;
+      }
+      case "setOn": {
+        const target = this.value(s.obj);
+        const defaults: Record<string, string> = {};
+        const o = s.value.k === "lit" && s.value.value === null ? null : this.operand(s.value, s.type);
+        const id = this.emit("set", this.profile.nodeClasses.variableSet, [this.varRef(s.name, s.owner)], { k: "set", name: s.name, class: s.owner }, s.span);
+        this.execInto(id);
+        this.link(target.pin, `${id}.${P.self}`);
+        const objects: Record<string, string> = {};
+        if (o) this.feed(o, id, s.name, defaults, objects);
+        this.settle(id, defaults, objects);
+        const nulls = [...target.nulls, ...(o?.nulls ?? [])];
+        if (nulls.length > 0) this.cur = [...this.cur, ...nulls];
+        return;
+      }
       case "setSelf": {
         const defaults: Record<string, string> = {};
         let o: Operand | null = null;
         if (!(s.value.k === "lit" && s.value.value === null)) o = this.operand(s.value, s.type);
         const id = this.setVar(s.name, s.span);
         this.execInto(id);
-        if (o) this.feed(o, id, s.name, defaults);
-        if (Object.keys(defaults).length > 0) this.nodes.find((n) => n.id === id)!.pinDefaults = defaults;
+        const objects: Record<string, string> = {};
+        if (o) this.feed(o, id, s.name, defaults, objects);
+        this.settle(id, defaults, objects);
         if (o && o.nulls.length > 0) this.cur = [...this.cur, ...o.nulls];
         return;
       }
@@ -705,8 +844,20 @@ export class UnitBuilder {
           this.locals.set(s.local, lit === undefined ? {} : { lit });
           return;
         }
+        // a row-handle literal has no node at all (see ROW_HANDLE_RE): the const is its pin default text wherever it is used
+        if (init.k === "makeStruct" && ROW_HANDLE_RE.test(init.struct)) {
+          const lit = structLiteralText(init);
+          if (lit !== undefined) {
+            this.locals.set(s.local, { lit });
+            return;
+          }
+        }
         const v = this.value(init);
-        if (init.k === "call" && init.pure && s.uses >= 2) {
+        // a pure node is evaluated again at every consumer: a value that reads state (an own variable, an array length, a member
+        // getter) would see later writes, so it is stored where the const stands; so is a pure call used twice (it may be random)
+        const reads = readsState(init, this.unstable);
+        const snapshot = (init.k === "call" && init.pure && s.uses >= 2) || (reads && !s.nextOnly);
+        if (snapshot && v.nulls.length === 0 && !v.execOuts && !v.pendingNull && init.type !== "result") {
           const name = `abfc_${this.event.name}_t${this.tempCount++}`;
           this.vars.push({ name, type: init.type === "void" || init.type === "null" ? "name" : init.type, flags: ["transient"], origin: s.span, temp: true });
           const set = this.setVar(name, s.span);
@@ -715,6 +866,7 @@ export class UnitBuilder {
           this.locals.set(s.local, { temp: name });
           return;
         }
+        if (reads) this.unstable.add(s.local); // read right away by the next statement: still a live pure value there
         if (v.nulls.length > 0) this.unsupported("an optional chain bound to a constant", s.span);
         const info: LocalInfo = { pin: v.pin };
         if (v.execOuts) info.execOuts = v.execOuts;
@@ -750,27 +902,34 @@ export class UnitBuilder {
         return;
       }
       case "return": {
-        if (s.value === undefined) {
+        if (s.value === undefined && s.outs === undefined) {
           this.cur = [];
           return;
         }
-        const type = this.event.returnType!;
-        const o = this.operand(s.value, type);
-        if (o.nulls.length > 0) this.unsupported("an optional chain (?.) in a return value; check isValid first", s.span);
-        if (this.directReturn && o.pin !== undefined) {
-          this.link(o.pin, `result.${FUNCTION_RETURN_PIN}`);
-        } else {
-          const temp = `abfc_${this.event.name}_r`;
-          if (!this.returnTemp) this.vars.push({ name: temp, type, flags: ["transient"], origin: s.span, temp: true });
+        const outs =
+          s.outs !== undefined
+            ? s.outs.map((x) => ({ pin: x.pin, value: x.value, type: this.event.outputs!.find((y) => y.name === x.pin)!.type }))
+            : [{ pin: FUNCTION_RETURN_PIN, value: s.value!, type: this.event.returnType! }];
+        for (const out of outs) {
+          const o = this.operand(out.value, out.type);
+          if (o.nulls.length > 0) this.unsupported("an optional chain (?.) in a return value; check isValid first", s.span);
+          if (this.directReturn && o.pin !== undefined) {
+            this.link(o.pin, `result.${out.pin}`);
+            continue;
+          }
+          // a value that is not a pin, or several returns: a temp per out pin, set before each return, read once into the result
+          const temp = out.pin === FUNCTION_RETURN_PIN ? `abfc_${this.event.name}_r` : `abfc_${this.event.name}_${out.pin}`;
+          const first = !this.returnTemps.has(out.pin);
+          if (first) this.vars.push({ name: temp, type: out.type, flags: ["transient"], origin: s.span, temp: true });
           const defaults: Record<string, string> = {};
           const objects: Record<string, string> = {};
           const set = this.setVar(temp, s.span);
           this.execInto(set);
           this.feed(o, set, temp, defaults, objects);
           this.settle(set, defaults, objects);
-          if (!this.returnTemp) {
-            this.returnTemp = true;
-            this.link(this.getVar(temp, s.span), `result.${FUNCTION_RETURN_PIN}`);
+          if (first) {
+            this.returnTemps.add(out.pin);
+            this.link(this.getVar(temp, s.span), `result.${out.pin}`);
           }
         }
         for (const x of this.cur) this.link(x, `result.${P.execute}`);
@@ -788,21 +947,32 @@ export class UnitBuilder {
         });
         return;
       case "arrayOp": {
-        const fn = s.op === "push" ? "Array_Add" : s.op === "removeAt" ? "Array_Remove" : "Array_Clear";
+        const fn = { push: "Array_Add", removeAt: "Array_Remove", clear: "Array_Clear", set: "Array_Set" }[s.op];
         const elem = s.array.type.slice("array:".length);
         const arr = this.getVar(s.array.self, s.span);
-        const arg = s.op === "push" ? s.value : s.op === "removeAt" ? s.index : undefined;
-        const argPin = s.op === "push" ? "NewItem" : "IndexToRemove";
-        const o = arg ? this.optOperand(arg, s.op === "push" ? elem : "int") : undefined;
         const pinTypes: Record<string, string> = { [P.arrayLengthArray]: s.array.type };
-        if (s.op === "push") pinTypes[argPin] = elem;
+        // [operand, pin, pin type]: push feeds NewItem, removeAt IndexToRemove, set Index and Item
+        const args: Array<[HirExpr, string, string]> = [];
+        if (s.op === "push" && s.value) args.push([s.value, "NewItem", elem]);
+        if (s.op === "removeAt" && s.index) args.push([s.index, "IndexToRemove", "int"]);
+        if (s.op === "set" && s.index && s.value) args.push([s.index, "Index", "int"], [s.value, "Item", elem]);
+        const ops: Array<{ o: Operand; pin: string }> = [];
+        for (const [x, pin, ty] of args) {
+          const o = this.optOperand(x, ty);
+          if (o) ops.push({ o, pin });
+        }
+        if (s.op === "push") pinTypes.NewItem = elem;
+        if (s.op === "set") pinTypes.Item = elem;
         const id = this.emit("arr", this.profile.nodeClasses.callArrayFunction, [this.arrayFn(fn)], undefined, s.span, { pinTypes });
         this.execInto(id);
         this.link(arr, `${id}.${P.arrayLengthArray}`);
         const defaults: Record<string, string> = {};
-        if (o) this.feed(o, id, argPin, defaults);
-        this.settle(id, defaults);
-        if (o && o.nulls.length > 0) this.cur = [...this.cur, ...o.nulls];
+        const objects: Record<string, string> = {};
+        for (const { o, pin } of ops) this.feed(o, id, pin, defaults, objects);
+        if (s.op === "set") defaults.bSizeToFit = "false";
+        this.settle(id, defaults, objects);
+        const nulls = ops.flatMap(({ o }) => o.nulls);
+        if (nulls.length > 0) this.cur = [...this.cur, ...nulls];
         return;
       }
       case "containerOp": {
@@ -1013,6 +1183,54 @@ function forLoopBound(s: Extract<HirStmt, { k: "forCount" }>): { bound: HirExpr;
   if (c.k !== "cmp" || c.kind !== "int" || (c.op !== "<" && c.op !== "<=")) return undefined;
   if (c.a.k !== "local" || c.a.id !== s.counter || !isPureBound(c.b, s.counter)) return undefined;
   return { bound: c.b, inclusive: c.op === "<=" };
+}
+
+/**
+ * Whether a pure expression reads state that a later statement can change, so that its value depends on when a consumer
+ * runs: own or other objects' variables, arrays, containers, and pure member calls. Literals, parameters, locals (stable:
+ * a literal, an exec node's output or a temp) and outputs of impure calls are fixed once evaluated.
+ */
+export function readsState(e: HirExpr, unstable: ReadonlySet<LocalId> = new Set()): boolean {
+  const r = (x: HirExpr): boolean => readsState(x, unstable);
+  switch (e.k) {
+    case "local":
+      return unstable.has(e.id);
+    case "getSelf":
+    case "getOn":
+    case "containerQuery":
+      return true;
+    case "call":
+      if (!e.pure) return false;
+      if (!e.static) return true;
+      return e.args.some((a) => r(a.value));
+    case "out":
+      return r(e.call);
+    case "field":
+      return r(e.obj);
+    case "length":
+      return r(e.array);
+    case "index":
+      return r(e.array) || r(e.index);
+    case "arrayFind":
+      return r(e.array) || r(e.value);
+    case "arith":
+    case "cmp":
+    case "eq":
+    case "and":
+    case "or":
+      return r(e.a) || r(e.b);
+    case "not":
+      return r(e.e);
+    case "isValid":
+    case "cast":
+      return r(e.value);
+    case "formatText":
+      return e.args.some((a) => r(a.value));
+    case "makeStruct":
+      return e.fields.some((f) => r(f.value));
+    default:
+      return false;
+  }
 }
 
 /** Whether evaluating the expression emits no exec node and no null exit, and does not read the loop counter. */

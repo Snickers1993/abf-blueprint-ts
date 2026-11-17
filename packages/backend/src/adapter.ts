@@ -1,6 +1,6 @@
 // IR -> bp_apply adapter (design 7.3): renders an ApplyPlan into bp_apply specs and runs it against a Backend.
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { AbfcError } from "@abfc/env";
 import { parseBpType } from "@abfc/ir";
 import type { ApplyPlan, AssetPlan, BackendCapabilities, Diagnostic, EventMeta, IrNode, IrParam, IrUnit, Profile } from "@abfc/ir";
@@ -45,7 +45,18 @@ export interface BpApplyAssetSpec {
   /** Function graphs to delete (TS wins: hand-made functions of a non-hybrid class). */
   remove_functions?: string[];
   /** Backend bp_apply feature `function_graphs`: own function graphs to create (signature only; the body comes in `graphs`). A name also in `remove_functions` is replaced. */
-  functions?: Array<{ name: string; inputs: IrParam[]; outputs: IrParam[]; access?: "public" | "protected" | "private" }>;
+  functions?: Array<{ name: string; inputs: IrParam[]; outputs: IrParam[]; access?: "public" | "protected" | "private"; /** Overrides the parent function of this name: the generated class path of the class that declares it (backend feature `override_functions`). */ override?: string; /** The parent function's access specifier when the source states it (`@bpAccess`); else the backend reads it from the parent. */ override_access?: "protected" | "private" }>;
+  /**
+   * Blueprint interfaces the class implements (`class`: generated class path), with the signatures of the interface functions that
+   * have outputs and are implemented (their bodies come in `graphs`). Backend bp_apply feature `interfaces` (abfc patch): an
+   * interface the class already implements is not added twice, and its listed function graphs are reset instead of created.
+   */
+  interfaces?: Array<{ class: string; functions: Array<{ name: string; inputs: IrParam[]; outputs: IrParam[] }> }>;
+  /**
+   * Components: `ensure` creates a missing one and modifies an existing one; `values` are field-default JSON values
+   * (kinds none/bool/num/str/name/text/asset/class/struct/array) set on the component template. Backend bp_apply feature `components` (abfc patch).
+   */
+  components?: Array<{ name: string; class: string; parent?: string; ensure: true; values: Record<string, unknown> }>;
   graphs?: BpGraphSpec[];
   raw?: Array<{ kind: "graph"; graph: string; text: string } | { kind: "python"; code: string }>;
   /** Backend 2.5.0 (bp_apply feature `class_manager_row`): write the class-manager row of a `@director` class after the Blueprints are saved. */
@@ -162,6 +173,9 @@ export function renderMainSpec(a: AssetPlan, caps: BackendCapabilities, profile:
   }
   // A missing asset is created by the first spec that names it; `if_missing` keeps a repeated apply (the fallback route runs two) idempotent.
   if (a.create !== undefined) spec.create = { class: a.create.class, parent: a.create.parent, if_missing: true };
+  if ((a.components?.length ?? 0) > 0) {
+    spec.components = a.components!.map((c) => ({ name: c.name, class: c.class, ...(c.attachTo !== undefined ? { parent: c.attachTo } : {}), ensure: true as const, values: c.props }));
+  }
   if (a.variables.length > 0) {
     spec.variables = a.variables.map((v) => ({
       name: v.name,
@@ -223,7 +237,16 @@ export function renderMainSpec(a: AssetPlan, caps: BackendCapabilities, profile:
   }
   if ((a.removeVariables?.length ?? 0) > 0) spec.remove_variables = [...a.removeVariables!];
   if ((a.removeFunctions?.length ?? 0) > 0) spec.remove_functions = [...a.removeFunctions!];
-  if ((a.functions?.length ?? 0) > 0) spec.functions = a.functions!.map((f) => ({ name: f.name, inputs: f.inputs, outputs: f.outputs, access: f.access }));
+  // an interface function graph belongs to the interface entry (ImplementedInterfaces), not to FunctionGraphs
+  const ifaceSet = new Set(a.interfaces ?? []);
+  const ownFns = (a.functions ?? []).filter((f) => f.override === undefined || !ifaceSet.has(f.override));
+  if (ownFns.length > 0) spec.functions = ownFns.map((f) => ({ name: f.name, inputs: f.inputs, outputs: f.outputs, access: f.access, ...(f.override !== undefined ? { override: f.override, ...(f.access !== "public" ? { override_access: f.access } : {}) } : {}) }));
+  if (ifaceSet.size > 0) {
+    spec.interfaces = [...ifaceSet].map((cls) => ({
+      class: cls,
+      functions: (a.functions ?? []).filter((f) => f.override === cls).map((f) => ({ name: f.name, inputs: f.inputs, outputs: f.outputs })),
+    }));
+  }
   // A removed function graph is gone before the graphs are edited (nothing to edit); a replaced one is created fresh (nothing to remove).
   // A function graph without any node or wire to add needs no edit at all.
   for (const graph of a.removeFunctions ?? []) {
@@ -300,10 +323,12 @@ function entryFor(r: BpApplyResult, asset: string, i: number): NonNullable<BpApp
   return r.assets?.find((x) => x.asset === asset) ?? r.assets?.[i];
 }
 
-function readFinal(run: string, i: number): string | null {
+/** The export the backend wrote after a pass: `final_<i>.t3d` of the run, else the file its result names for the asset (`final`). */
+function readFinal(run: string, i: number, named?: string): string | null {
   if (run === "") return null;
-  const file = join(run, `final_${i}.t3d`);
-  return existsSync(file) ? readFileSync(file, "utf8") : null;
+  const files = [join(run, `final_${i}.t3d`), ...(named !== undefined && named !== "" ? [isAbsolute(named) ? named : join(run, named)] : [])];
+  for (const file of files) if (existsSync(file)) return readFileSync(file, "utf8");
+  return null;
 }
 
 function patchRefs(a: AssetPlan, spec: BpApplyAssetSpec, caps: BackendCapabilities, profile: Profile): WildcardPatchRef[] {
@@ -429,7 +454,7 @@ export function dependencyOrder(items: Array<{ path: string; text: string }>): n
   return out;
 }
 
-/** Applies the plan: one main pass (native pin types, or the two-phase fallback), then the tag pass, then the class-defaults pass (pass 5). */
+/** Applies the plan: one main pass (native pin types, or the two-phase fallback) that also carries the ownership comment boxes where it can, a tag pass for the rest, then the class-defaults pass (pass 5). */
 export async function applyPlan(
   backend: Backend,
   plan: ApplyPlan,
@@ -439,7 +464,9 @@ export async function applyPlan(
 ): Promise<ApplyOutcome> {
   if (plan.assets.length === 0) return { ok: true, perAsset: [] };
   // Assets that only carry class defaults have no graph work: they take part in pass 5 only (new own fields still go through the main spec).
-  const planned = plan.assets.filter((a) => a.create !== undefined || a.struct !== undefined || a.units.length > 0 || a.variables.length > 0 || (a.removeUnits?.length ?? 0) > 0 || (a.removeTags?.length ?? 0) > 0 || (a.removeGraphNodes?.length ?? 0) > 0 || (a.removeVariables?.length ?? 0) > 0 || (a.removeFunctions?.length ?? 0) > 0 || (a.functions?.length ?? 0) > 0 || Object.keys(a.variableDefaults ?? {}).length > 0);
+  const planned = plan.assets.filter((a) => a.create !== undefined || a.struct !== undefined || a.units.length > 0 || a.variables.length > 0 || (a.removeUnits?.length ?? 0) > 0 || (a.removeTags?.length ?? 0) > 0 || (a.removeGraphNodes?.length ?? 0) > 0 || (a.removeVariables?.length ?? 0) > 0 || (a.removeFunctions?.length ?? 0) > 0 || (a.functions?.length ?? 0) > 0 || Object.keys(a.variableDefaults ?? {}).length > 0 ||
+    // components and interfaces are main-spec work: a re-planned asset that has them (the structure hash made its defaults stale) sends them again, the backend adds only what is missing
+    (a.defaults !== undefined && ((a.components?.length ?? 0) > 0 || (a.interfaces?.length ?? 0) > 0)));
   if (planned.length === 0) {
     const only: AssetApplyOutcome[] = plan.assets.map((a) => ({ asset: a.asset, nodeIds: {}, finalText: null, compile: [], tagName: null, tagNames: {}, defaultsApplied: false, defaultsWarnings: [] }));
     const added = await applyDefaultsPass(backend, plan, only, caps, o);
@@ -453,6 +480,19 @@ export async function applyPlan(
   const specs = order.map((i) => rendered[i]!);
   const refs = unitAssets.map((a, i) => patchRefs(a, specs[i]!, caps, profile));
   const needsFallback = !caps.pinTypes && refs.some((r) => r.length > 0);
+  // The ownership comment boxes go in the main call when every graph they go in is already in it (one backend job less, about
+  // as long as the main one on a warm session); the two-phase route and ABFC_TAG_PASS=separate keep the separate tag pass.
+  const inlineTags = new Set<number>();
+  if (!needsFallback && process.env["ABFC_TAG_PASS"] !== "separate") {
+    unitAssets.forEach((a, i) => {
+      if (a.units.length === 0) return;
+      const graphs = specs[i]!.graphs ?? [];
+      const tagSpec = renderTagSpec(a, a.units, profile);
+      if (!(tagSpec.graphs ?? []).every((t) => graphs.some((g) => g.graph === t.graph))) return;
+      for (const t of tagSpec.graphs ?? []) graphs.find((g) => g.graph === t.graph)!.add.push(...t.add);
+      inlineTags.add(i);
+    });
+  }
 
   let ok: boolean;
   let last: BpApplyResult;
@@ -485,7 +525,7 @@ export async function applyPlan(
     return {
       asset: a.asset,
       nodeIds,
-      finalText: ok ? readFinal(last.run, i) : null,
+      finalText: ok ? readFinal(last.run, i, entryFor(last, a.asset, i)?.final) : null,
       compile: errors.filter((e) => e.asset === null || e.asset === a.asset),
       tagName: null,
       tagNames: {},
@@ -498,8 +538,19 @@ export async function applyPlan(
   );
   if (!ok) return { ok: false, perAsset };
 
+  for (const i of inlineTags) {
+    const a = unitAssets[i]!;
+    const out = perUnitAsset[i]!;
+    const graphs = specs[i]!.graphs ?? [];
+    const ids = entryFor(last, a.asset, i)?.node_ids ?? {};
+    for (const u of a.units) {
+      const real = ids[`graph:${graphs.findIndex((g) => g.graph === u.unit.graph)}`]?.[`cmt_${slug(u.unit.name)}`];
+      if (real !== undefined) out.tagNames[u.unit.id] = real;
+    }
+    out.tagName = Object.values(out.tagNames)[0] ?? null;
+  }
   // Only assets with units get a comment box (an asset with only removals has nothing to tag).
-  const tagAssets = unitAssets.map((a, i) => ({ a, i })).filter((x) => x.a.units.length > 0);
+  const tagAssets = unitAssets.map((a, i) => ({ a, i })).filter((x) => x.a.units.length > 0 && !inlineTags.has(x.i));
   if (tagAssets.length > 0) {
     const tagSpecs = tagAssets.map((x) => renderTagSpec(x.a, x.a.units, profile));
     const tag = await backend.applySpecs(plan.mod, tagSpecs, { label: "tags", cacheDir: o.cacheDir });
@@ -524,7 +575,7 @@ export async function applyPlan(
         if (real !== undefined) out.tagNames[u.unit.id] = real;
       }
       out.tagName = Object.values(out.tagNames)[0] ?? null;
-      out.finalText = readFinal(tag.run, ti) ?? out.finalText;
+      out.finalText = readFinal(tag.run, ti, entry?.final) ?? out.finalText;
     });
   }
   const added = await applyDefaultsPass(backend, plan, perAsset, caps, o);

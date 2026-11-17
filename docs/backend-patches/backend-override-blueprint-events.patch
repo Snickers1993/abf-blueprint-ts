@@ -1,0 +1,117 @@
+diff --git a/editor/bpkit/apply.py b/editor/bpkit/apply.py
+index 5fae4c0..c60831b 100644
+--- a/editor/bpkit/apply.py
++++ b/editor/bpkit/apply.py
+@@ -208,6 +208,10 @@ def apply_asset(spec, mod, index=0):
+         if _kind == "graph":
+             _preload(env, owner)
+     items, keymap, extra_vars, disp = {}, {}, [], {}
++    # override events of a Blueprint class (e.g. a game weapon's GunStartFiring): the Actor scratch has no such event, and Unreal
++    # turns an event it cannot resolve into a custom event named like the parent's function (compiled as GunStartFiring_1, never
++    # called). They are templated in a scratch child of the class that declares the event instead. Native events are unchanged.
++    bp_overrides = {}
+     self_events, self_keys = _self_events(scopes), set()
+     for d in spec.get("dispatchers") or []:
+         disp[d["name"]] = d.get("params") or []
+@@ -217,19 +221,25 @@ def apply_asset(spec, mod, index=0):
+             if k in specs.MANUAL_KINDS:
+                 continue
+             cls, body = specs.NODE_KINDS[k](n, env)
+-            key = "n%d" % len(items)
++            key = "n%d" % (len(items) + sum(len(v) for v in bp_overrides.values()))
+             if k == "call" and not n.get("class") and n["function"] in self_events:
+                 # the real class lacks this event until the edit below: template it against the scratch class's own event
+                 body = ['FunctionReference=(MemberName="%s",bSelfContext=True)' % n["function"]]
+                 self_keys.add(key)
+-            items[key] = (cls, body)
++            if k == "override" and not n["class"].startswith("/Script/"):
++                bp_overrides.setdefault(n["class"], {})[key] = (cls, body)
++            else:
++                items[key] = (cls, body)
+             keymap[(scope, n["id"])] = key
+             if k in ("get", "set") and n.get("type"):
+                 extra_vars.append(t3d.var_line(n["name"], n["type"]))
+             if k in ("call_dispatcher", "bind_dispatcher") and n["name"] not in disp:
+                 disp[n["name"]] = n.get("params") or []
+     templates = {}
+-    if items:
++    raw = {}
++    for parent_path, sub in bp_overrides.items():
++        raw.update(graphs.make_templates(sub, parent=must(unreal.load_class(None, parent_path), "class " + parent_path)))
++    if items or raw:
+         seen, svars = set(), []
+         lines = assets.variable_lines(bp) + assets.component_vars(bp) + (assets.widget_vars(bp) if is_wbp else []) + extra_vars
+         for v in lines:
+@@ -240,7 +250,8 @@ def apply_asset(spec, mod, index=0):
+             svars.append(v)
+         setups = [(lambda z, n=n, p=p: assets.add_dispatcher(z, n, p)) for n, p in disp.items()]
+         setups += [(lambda z, t=t, g=g: assets.add_timeline(z, t, g)) for t, g in tl_specs.values()]
+-        raw = graphs.make_templates(items, svars, setups, list(self_events.items()))
++        if items:
++            raw.update(graphs.make_templates(items, svars, setups, list(self_events.items())))
+         cls_text = core.gen_class_text(bp)
+         for sk, key in keymap.items():
+             templates[sk] = t3d.retarget(raw[key], cls_text)
+diff --git a/editor/bpkit/graphs.py b/editor/bpkit/graphs.py
+index b185853..9ed99a6 100644
+--- a/editor/bpkit/graphs.py
++++ b/editor/bpkit/graphs.py
+@@ -63,14 +63,15 @@ def _rebuild_scratch_pins(bp):
+     LIB.reparent_blueprint(bp, unreal.Actor)
+ 
+ 
+-def make_templates(items, scratch_vars=(), setups=(), self_events=()):
++def make_templates(items, scratch_vars=(), setups=(), self_events=(), parent=None):
+     """items: {key: (class_path, body_lines)}. Returns {key: [lines]} with every pin the engine would make.
+     self_events: [(name, params)] custom events the spec adds; they exist in the scratch graph so a self call to one
+-    gets its pins before the real asset has the event. The scratch Blueprint (parent Actor) lives under CFG.dest and is never saved."""
++    gets its pins before the real asset has the event. The scratch Blueprint (parent Actor, or `parent`) lives under CFG.dest
++    and is never saved."""
+     from . import assets
+     _SCRATCH[0] += 1
+     fac = unreal.BlueprintFactory()
+-    fac.set_editor_property("parent_class", unreal.Actor)
++    fac.set_editor_property("parent_class", parent if parent is not None else unreal.Actor)
+     z = must(core.tools().create_asset("BP_BkScratch%d" % _SCRATCH[0], CFG.dest, unreal.Blueprint, fac), "scratch Blueprint")
+     if scratch_vars:
+         assets.set_vars(z, list(scratch_vars))
+diff --git a/tests/test_unit.py b/tests/test_unit.py
+index 35d1771..d55317f 100644
+--- a/tests/test_unit.py
++++ b/tests/test_unit.py
+@@ -2508,7 +2508,10 @@ class SelfEventCallTests(unittest.TestCase):
+         bp.get_class.return_value.get_name.return_value = "Blueprint"
+         bp.__str__ = lambda self: "Blueprint'/Mod/BP_X.BP_X'"
+ 
+-        def make_templates(items, svars, setups, self_events=()):
++        def make_templates(items, svars=(), setups=(), self_events=(), parent=None):
++            if parent is not None:
++                seen.setdefault("parented", []).append((parent, dict(items)))
++                return {k: ["EventReference=(MemberParent=\"x\",MemberName=\"GunStartFiring\")", "bOverrideFunction=True"] for k in items}
+             seen["items"], seen["self_events"] = dict(items), list(self_events)
+             return {k: ["FunctionReference=(MemberName=\"NewEv\",bSelfContext=True,MemberGuid=0123ABCD)"] if "bSelfContext" in b[0]
+                     else ["FunctionReference=(MemberParent=\"x\",MemberName=\"Other\")"] for k, (c, b) in items.items()}
+@@ -2540,6 +2543,23 @@ class SelfEventCallTests(unittest.TestCase):
+         self.assertEqual(t[("graph:0", "c1")], ['FunctionReference=(MemberName="NewEv",bSelfContext=True)'])   # MemberGuid stripped
+         self.assertEqual(t[("graph:0", "c2")], ['FunctionReference=(MemberParent="x",MemberName="Other")'])   # not self: untouched
+ 
++    def test_override_of_a_blueprint_class_event_is_templated_in_a_child_of_that_class(self):
++        gun = "/Game/Weapons/Gun_ParentBP.Gun_ParentBP_C"
++        with mock.patch.object(self.apply.unreal, "load_class", side_effect=lambda outer, path: "LOADED " + path, create=True):
++            seen = self._apply([
++                {"id": "o", "k": "override", "function": "GunStartFiring", "class": gun},
++                {"id": "t", "k": "override", "function": "ReceiveTick", "class": "/Script/Engine.Actor"},
++            ])
++        # the Blueprint-class override: its own scratch, a child of the declaring class (the Actor scratch would make it a custom event)
++        self.assertEqual([p for p, _ in seen["parented"]], ["LOADED " + gun])
++        self.assertEqual([b for _, its in seen["parented"] for (c, b) in its.values()][0][0], 'EventReference=(MemberParent="%s",MemberName="GunStartFiring")' % gun)
++        # the native override stays in the shared Actor scratch, as before
++        self.assertEqual([b[0] for (c, b) in seen["items"].values()], ['EventReference=(MemberParent="/Script/Engine.Actor",MemberName="ReceiveTick")'])
++        t = seen["templates"]
++        self.assertIn(("graph:0", "o"), t)
++        self.assertIn(("graph:0", "t"), t)
++        self.assertNotEqual(t[("graph:0", "o")], t[("graph:0", "t")])
++
+     def test_wiring_error_names_the_spec(self):
+         g = self.graphs
+         model = GraphModel()

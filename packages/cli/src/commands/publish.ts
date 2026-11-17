@@ -7,6 +7,7 @@ import {
   listManifests,
   loadProgram,
   readManifest,
+  snapshotPublishedManifests,
   writeManifest,
 } from "@abfc/compiler";
 import type { Diagnostic } from "@abfc/ir";
@@ -320,6 +321,8 @@ async function copyToMod(
   const files = [...list.changed, ...list.added, ...deleting];
   if (files.length + list.config.length === 0) {
     finishPending(ctx, list, canDelete, null);
+    // The stage's owned assets are the mod's: the manifests describe what the mod holds.
+    snapshotPublishedManifests(ctx.projectDir, mod);
     tally.listed = 0;
     output.info("nothing to publish.", "dim");
     return output.exitCode();
@@ -372,7 +375,16 @@ async function copyToMod(
     if (list.syncedAt === null || (m.classDefaultsStageSyncedAt ?? null) !== list.syncedAt) continue;
     writeManifest(ctx.projectDir, { ...m, classDefaultsPublished: true });
   }
+  // Own fields' defaults applied to the stage's current sync are in the mod now too.
+  for (const asset of assets) {
+    const m = readManifest(ctx.projectDir, asset);
+    if (m === null || m.variablesPublished === true || list.syncedAt === null || (m.variablesStageSyncedAt ?? null) !== list.syncedAt) continue;
+    writeManifest(ctx.projectDir, { ...m, variablesPublished: true });
+  }
   finishPending(ctx, list, canDelete, r);
+  // What the mod holds now: a later re-sync (the mod saved before the next publish, a publish that fails) falls back to these entries
+  // for the nodes it brings back, so abfc's published units are never mistaken for hand-made ones.
+  snapshotPublishedManifests(ctx.projectDir, mod);
   tally.published = r.published.length;
   output.info("published:", "ok");
   if (r.published.length === 0) output.info(`  ${r.message}`);

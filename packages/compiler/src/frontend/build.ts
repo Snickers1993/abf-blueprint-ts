@@ -3,6 +3,7 @@ import ts from "typescript";
 import { BpTypeError, DEFAULT_CLASS_MANAGER_TABLE, DIRECTOR_TAG_PREFIX, gameplayTagProblem, joinModPath, parseBpType, segmentProblem } from "@abfc/ir";
 import type { Diagnostic, Profile, Span } from "@abfc/ir";
 import type { BpType, HirClass, HirEvent, HirField, HirExpr, HirProgram, HirStmt, HirStruct, LocalId } from "../hir.js";
+import { FUNCTION_RETURN_PIN } from "../hir.js";
 import { assetPathOf, bindPathContext, modImportHints, pathContextOf } from "./assetpaths.js";
 import type { AssetPathInfo, CompilerProjectConfig } from "./assetpaths.js";
 import { DiagSink, Fail, relFile, spanOf } from "./diag.js";
@@ -19,13 +20,26 @@ const ACTOR_COMPONENT = "/Script/Engine.ActorComponent";
 const NUMERIC = new Set(["int", "int64", "byte", "float", "double", "real"]);
 const STRINGY = new Set(["name", "text", "string"]);
 /** `@blueprint` options that set class defaults (applied by the class-defaults pass). */
-const CLASS_OPTIONS = new Set(["replicates", "alwaysRelevant", "onlyRelevantToOwner", "netUpdateFrequency", "minNetUpdateFrequency", "tickInterval", "kind"]);
+const CLASS_OPTIONS = new Set(["replicates", "alwaysRelevant", "onlyRelevantToOwner", "netUpdateFrequency", "minNetUpdateFrequency", "tickInterval", "tickEnabled", "kind"]);
 /** Boolean class options -> class default (T3D property name). */
 const BOOL_DEFAULTS: Record<string, string> = {
   replicates: "bReplicates",
   alwaysRelevant: "bAlwaysRelevant",
   onlyRelevantToOwner: "bOnlyRelevantToOwner",
+  /** PrimaryActorTick.bStartWithTickEnabled (written through the tick struct by the class-defaults pass). */
+  tickEnabled: "bStartWithTickEnabled",
 };
+/** Field types whose default is written on the class default object (class-defaults pass), not as the variable's default text. */
+const CDO_FIELD_TYPE = /^(struct:|object:|class:|softobject:|softclass:|array:|text$)/;
+/** A field default for the class-defaults pass (JSON; read by the fixed Python template, never pasted as code). */
+type CdoValue =
+  | { k: "none" }
+  | { k: "bool"; v: boolean }
+  | { k: "num"; v: number }
+  | { k: "str" | "name" | "text"; v: string }
+  | { k: "asset" | "class"; path: string }
+  | { k: "struct"; name: string; fields: Record<string, CdoValue> }
+  | { k: "array"; items: CdoValue[] };
 /** Number class options -> class default (T3D property name). */
 const NUMBER_DEFAULTS: Record<string, string> = {
   netUpdateFrequency: "NetUpdateFrequency",
@@ -33,7 +47,7 @@ const NUMBER_DEFAULTS: Record<string, string> = {
   tickInterval: "TickInterval",
 };
 /** Class options that only exist on an Actor (the parent chain must reach `/Script/*.Actor`). */
-const ACTOR_ONLY_OPTIONS = new Set(["alwaysRelevant", "onlyRelevantToOwner", "netUpdateFrequency", "minNetUpdateFrequency", "tickInterval"]);
+const ACTOR_ONLY_OPTIONS = new Set(["alwaysRelevant", "onlyRelevantToOwner", "netUpdateFrequency", "minNetUpdateFrequency", "tickInterval", "tickEnabled"]);
 const ARRAY_OWN_ONLY = "an array can only be changed as a statement on an own array variable: this.<Array>.push(x), this.<Array>.splice(i, 1) or this.<Array>.length = 0";
 const CONTAINERS = new Set(["Map", "Set", "WeakMap", "WeakSet", "ReadonlyMap", "ReadonlySet"]);
 const CONTAINER_OWN_ONLY = "a Map or Set can only be used through an own field: this.<Field>.set(k, v), this.<Field>.has(k), this.<Field>.size, ...";
@@ -128,7 +142,7 @@ function children(e: HirExpr): HirExpr[] {
     case "length": return [e.array];
     case "callOwn": return e.args.map((a) => a.value);
     case "createWidget": return [e.owner];
-    case "spawn": return e.owner ? [e.owner] : [];
+    case "spawn": return [...(e.owner ? [e.owner] : []), ...(e.instigator ? [e.instigator] : []), ...(e.transform ? [e.transform] : [])];
     case "arith": return [e.a, e.b];
     case "cmp": return [e.a, e.b];
     case "index": return [e.array, e.index];
@@ -167,6 +181,10 @@ interface OwnSig {
   /** The TypeScript parameter symbols, in order (for binding the body). */
   paramSyms: Array<ts.Symbol | undefined>;
   overrideOf?: string;
+  /** An `@override` of a parent function with named outputs (not a lone ReturnValue): its out pins; a return gives them as an object literal. */
+  outs?: Array<{ pin: string; type: BpType }>;
+  /** TS name -> out pin, for `outs`. */
+  pinOfTs?: Map<string, string>;
 }
 
 /** Array methods that change the array; they are statements on an own array variable only. */
@@ -174,6 +192,8 @@ const ARRAY_MUTATORS = new Set(["push", "splice"]);
 
 /** A property with neither a type annotation nor `!` (`Score = 1;`) is not an own-field attempt: it keeps the generic ABFC2099. */
 function isLegacyProperty(m: ts.PropertyDeclaration): boolean {
+  if (m.initializer !== undefined && ts.isCallExpression(stripParens(m.initializer)) && ts.isIdentifier((stripParens(m.initializer) as ts.CallExpression).expression)
+    && ((stripParens(m.initializer) as ts.CallExpression).expression as ts.Identifier).text === "component") return false; // `Name = component(...)`
   return m.type === undefined && m.exclamationToken === undefined;
 }
 
@@ -191,8 +211,10 @@ function directExprs(s: HirStmt): HirExpr[] {
   switch (s.k) {
     case "expr": return [s.e];
     case "setSelf": return [s.value];
+    case "setOn": return [s.obj, s.value];
+    case "bind": return s.target === null ? [s.source] : [s.source, s.target];
     case "const": return [s.init];
-    case "return": return s.value ? [s.value] : [];
+    case "return": return [...(s.value ? [s.value] : []), ...(s.outs ?? []).map((o) => o.value)];
     case "if": return [s.cond];
     case "forOf": return [s.array];
     case "setSelfCond": return [s.cond, s.a, s.b];
@@ -207,6 +229,16 @@ function consumesCast(next: HirStmt, id: LocalId): boolean {
   const isLocal = (x: HirExpr): boolean => x.k === "local" && x.id === id;
   if (next.k === "if" && some(next.cond, isLocal)) return true;
   return directExprs(next).some((e) => some(e, (x) => x.k === "optional" && isLocal(x.value)));
+}
+
+/** `if (!isValid(<id>))`: a failed cast does not reach its branch (kept for the published Blueprints built that way). */
+function negatedIsValidOf(next: HirStmt, id: LocalId): boolean {
+  return next.k === "if" && next.cond.k === "not" && next.cond.e.k === "isValid" && next.cond.e.value.k === "local" && next.cond.e.value.id === id;
+}
+
+/** An if whose branch is only `return;` (and no else): ending the unit on a failed cast does the same. */
+function bareReturn(next: HirStmt): boolean {
+  return next.k === "if" && next.then.length === 1 && next.then[0]!.k === "return" && next.then[0]!.value === undefined && next.then[0]!.outs === undefined && next.else.length === 0;
 }
 
 function consumesExec(next: HirStmt, id: LocalId): boolean {
@@ -232,6 +264,13 @@ class HirBuilder {
   private unitKind: HirEvent["kind"] = "event";
   private unitName = "";
   private unitReturn: BpType | undefined;
+  /** The unit overrides a parent function with named outputs: its out pins (see OwnSig.outs). */
+  private unitOuts: Array<{ pin: string; type: BpType }> | undefined;
+  private unitPinOfTs: Map<string, string> | undefined;
+  /** The unit implements a parent's event or function (`@override`), as an event or a function graph. */
+  private unitOverride = false;
+  /** Interfaces of the class being built (`@blueprint({ interfaces })`): where an `@override` not found on the parent is looked up. */
+  private ifaceTypes: Array<{ path: string; type: ts.Type }> = [];
   /** Calls between the owned units of the class being built: caller -> callees (for the recursion check). */
   private ownCalls = new Map<string, Set<string>>();
   /** Name node of every owned function of the class being built. */
@@ -271,6 +310,7 @@ class HirBuilder {
     let classManagerRow: string | undefined;
     let classManagerRowNode: ts.Node | undefined;
     let widget = false;
+    const ifaces: Array<{ path: string; type: ts.Type }> = [];
     const defaultOpts: Array<{ key: string; prop: string; value: string; node: ts.Node }> = [];
     const opts = ts.isCallExpression(bp.expression) ? bp.expression.arguments[0] : undefined;
     if (opts && ts.isObjectLiteralExpression(opts)) {
@@ -280,17 +320,31 @@ class HirBuilder {
         if (key === "path") {
           // the asset path is resolved by assetPathOf below
         } else if (key === "parent") parentOption = lit;
+        else if (key === "interfaces") {
+          const init = (p as ts.PropertyAssignment).initializer;
+          if (!ts.isArrayLiteralExpression(init)) {
+            this.sink.error("ABFC2104", "@blueprint option interfaces must be an array literal of interface classes ([I_Interactable_C])", init);
+            continue;
+          }
+          for (const el of init.elements) {
+            const ci = this.classArg(el);
+            if (!ci || ci.kind !== "class") {
+              this.sink.error("ABFC2104", "an entry of interfaces must be a Blueprint interface class from the stubs (I_Interactable_C)", el);
+              continue;
+            }
+            if (ifaces.some((x) => x.path === ci.path)) {
+              this.sink.error("ABFC2104", `interface ${ci.path} is listed twice`, el);
+              continue;
+            }
+            this.classMeta[ci.path] = ci.meta;
+            ifaces.push({ path: ci.path, type: this.checker.getDeclaredTypeOfSymbol(ci.sym) });
+          }
+        }
         else if (key === "classManagerRow") {
           classManagerRow = lit;
           classManagerRowNode = p;
         }
-        else if (key === "tickEnabled") {
-          this.sink.error(
-            "ABFC2063",
-            `@blueprint option "tickEnabled" is not supported yet: writing the saved PrimaryActorTick.bStartWithTickEnabled has not been verified in the editor`,
-            p,
-          );
-        } else if (key !== undefined && CLASS_OPTIONS.has(key)) {
+        else if (key !== undefined && CLASS_OPTIONS.has(key)) {
           // class defaults: validated here, applied by the class-defaults pass (design 6.2 pass 5)
           const init = (p as ts.PropertyAssignment).initializer;
           const prop = BOOL_DEFAULTS[key] ?? NUMBER_DEFAULTS[key];
@@ -381,7 +435,9 @@ class HirBuilder {
       ...(classManagerRow !== undefined ? { classManagerRow } : {}),
       ...(director !== undefined ? { director } : {}),
       ...(widget ? { kind: "widget" as const } : {}),
+      ...(ifaces.length > 0 ? { interfaces: ifaces.map((x) => x.path) } : {}),
     };
+    this.ifaceTypes = ifaces;
     this.classMeta[cls.classPath] = widget ? WIDGET_META : BLUEPRINT_META;
 
     // Signatures first: a call or delegate reference may point to an event declared further down.
@@ -397,7 +453,8 @@ class HirBuilder {
     // Own fields first: an event body may use a field declared further down.
     for (const m of node.members) {
       if (!ts.isPropertyDeclaration(m) || isLegacyProperty(m) || (ts.isIdentifier(m.name) && this.isDesignerWidget(node, m.name.text))) continue;
-      const field = this.ownField(node, m);
+      const isComp = m.initializer !== undefined && ts.isCallExpression(stripParens(m.initializer)) && runtimeName(this.checker, stripParens(m.initializer) as ts.CallExpression) === "component";
+      const field = isComp ? this.componentField(node, m) : this.ownField(node, m);
       if (field === undefined) continue;
       cls.fields.push(field);
       const fsym = this.checker.getSymbolAtLocation(m.name);
@@ -728,6 +785,80 @@ class HirBuilder {
    * the variable's default. Reports ABFC2047 and returns undefined for any other property declaration, an initializer that is not a
    * literal of the field type, a type without a Blueprint equivalent, or a name that collides with an inherited member.
    */
+  /** `Name = component(Class, { Prop: value }, { attachTo: "Other" })`: a component of the Actor class (not a member variable). */
+  private componentField(node: ts.ClassDeclaration, m: ts.PropertyDeclaration): HirField | undefined {
+    const shown = m.name.getText();
+    const bad = (why: string, at: ts.Node = m.name): undefined => {
+      this.sink.error("ABFC2105", `component ${shown}: ${why}`, at);
+      return undefined;
+    };
+    if (!ts.isIdentifier(m.name)) return bad("a component is declared as `Name = component(Class, { props }, { attachTo })`");
+    const mods = (ts.getModifiers(m) ?? []).filter((x) => x.kind !== ts.SyntaxKind.PublicKeyword && x.kind !== ts.SyntaxKind.ReadonlyKeyword);
+    if (mods.length > 0 || m.questionToken !== undefined || m.exclamationToken !== undefined || (ts.getDecorators(m) ?? []).length > 0) {
+      return bad("a component is declared as `Name = component(Class, { props }, { attachTo })` (no decorators, static or `?`)");
+    }
+    if (this.cls.family !== "actor") return bad("only an Actor class has components");
+    const call = stripParens(m.initializer!) as ts.CallExpression;
+    const [clsArg, propsArg, optsArg] = call.arguments;
+    const ci = this.classArg(clsArg);
+    if (!ci || ci.kind !== "class") return bad("the first argument must be a component class from the stubs", clsArg ?? call);
+    const ctype = this.checker.getDeclaredTypeOfSymbol(ci.sym);
+    if (!this.derivesFromComponent(ctype)) return bad(`${ci.path} is not an ActorComponent`, clsArg!);
+    const csym = node.name ? this.checker.getSymbolAtLocation(node.name) : undefined;
+    const own = csym ? this.checker.getDeclaredTypeOfSymbol(csym) : undefined;
+    // The asset's own `_Manual` stub lists the components a build created (`abfc generate` reads them back as hand-made): the same
+    // name and class there is this declaration, not a collision.
+    const ownStub = (p: ts.Symbol): boolean => {
+      const tags = bpTagsOfSymbol(p);
+      return tags.has("bpComponent") && tags.get("bpPath")?.[0] === `${this.cls.classPath}:${shown}` && tags.get("bpType")?.[0] === `object:${ci.path}`;
+    };
+    if (own?.isClassOrInterface() && this.checker.getBaseTypes(own).some((b) => {
+      const p = this.checker.getPropertyOfType(b, m.name.getText());
+      return p !== undefined && !ownStub(p);
+    })) {
+      return bad("the name collides with a member of the parent class or a hand-made member of the asset; rename the component");
+    }
+    this.classMeta[ci.path] = ci.meta;
+    const props: Record<string, unknown> = {};
+    if (propsArg !== undefined && propsArg.kind !== ts.SyntaxKind.UndefinedKeyword && !(ts.isIdentifier(propsArg) && propsArg.text === "undefined")) {
+      const pl = stripParens(propsArg);
+      if (!ts.isObjectLiteralExpression(pl)) return bad("the properties must be an object literal", propsArg);
+      for (const p of pl.properties) {
+        if (!ts.isPropertyAssignment(p) || !(ts.isIdentifier(p.name) || ts.isStringLiteral(p.name))) return bad("only `Property: value` entries are supported", p);
+        const psym = this.checker.getPropertyOfType(ctype, p.name.text);
+        const pt = psym ? (bpTypeOfMember(psym) ?? bpTypeOf(this.checker, this.checker.getTypeOfSymbol(psym))) : undefined;
+        if (!psym || pt === undefined) return bad(`${ci.path} has no Blueprint property ${p.name.text}`, p.name);
+        const pname = splitMemberPath(bpPathOf(psym) ?? "")?.name ?? p.name.text;
+        try {
+          props[pname] = this.cdoValue(p.initializer, pt, `${shown}.${p.name.text}`);
+        } catch (e) {
+          if (e instanceof Fail) return undefined;
+          throw e;
+        }
+      }
+    }
+    let attachTo: string | undefined;
+    if (optsArg !== undefined) {
+      const ol = stripParens(optsArg);
+      if (!ts.isObjectLiteralExpression(ol)) return bad("the options must be an object literal ({ attachTo: \"Name\" })", optsArg);
+      for (const p of ol.properties) {
+        const key = ts.isPropertyAssignment(p) && ts.isIdentifier(p.name) ? p.name.text : undefined;
+        if (key !== "attachTo" || !ts.isPropertyAssignment(p) || !(ts.isStringLiteral(p.initializer) || ts.isNoSubstitutionTemplateLiteral(p.initializer))) {
+          return bad("the only option is attachTo: \"<component name>\" (a string literal)", p);
+        }
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(p.initializer.text)) return bad("attachTo must name a component", p.initializer);
+        attachTo = p.initializer.text;
+      }
+    }
+    if (call.arguments.length > 3) return bad("component(Class, props, options) takes at most three arguments", call);
+    return {
+      name: m.name.text,
+      type: `object:${ci.path}`,
+      span: this.sp(m.name),
+      component: { class: ci.path, props, ...(attachTo !== undefined ? { attachTo } : {}) },
+    };
+  }
+
   private ownField(node: ts.ClassDeclaration, m: ts.PropertyDeclaration): HirField | undefined {
     const shown = m.name.getText();
     const bad = (why: string): undefined => {
@@ -768,10 +899,99 @@ class HirBuilder {
     }
     let def: string | undefined;
     if (m.initializer !== undefined) {
-      def = this.fieldDefault(m.initializer, type, shown);
-      if (def === undefined) return undefined;
+      if (CDO_FIELD_TYPE.test(type)) {
+        // struct, object, class, array and text defaults: written on the class default object by the class-defaults pass
+        let v: CdoValue;
+        try {
+          v = this.cdoValue(m.initializer, type, shown);
+        } catch (e) {
+          if (e instanceof Fail) return undefined;
+          throw e;
+        }
+        this.cls.defaults[`field:${m.name.text}`] = JSON.stringify(v);
+      } else {
+        def = this.fieldDefault(m.initializer, type, shown);
+        if (def === undefined) return undefined;
+      }
     }
     return { name: m.name.text, type, ...(def !== undefined ? { default: def } : {}), span: this.sp(m.name) };
+  }
+
+  /**
+   * The value of a struct, object, class, array or text field initializer, for the class-defaults pass: literals, `asset(Class, path)`,
+   * a class, `null`, a native struct literal and an array literal of those. Anything else fails with ABFC2047.
+   */
+  private cdoValue(init: ts.Expression, type: BpType, shown: string): CdoValue {
+    const f: DiagSink = this.sink;
+    const e = stripParens(init);
+    const bad = (what: string): never =>
+      f.fail("ABFC2047", `field ${shown}: ${what}. A ${type} default can be a literal, asset(Class, "path"), a class, null, a struct literal of a native struct, or an array literal of those`, init);
+    if (e.kind === ts.SyntaxKind.NullKeyword) {
+      if (/^(object|class|softobject|softclass):/.test(type)) return { k: "none" };
+      return bad("null is only a default of an object or class field");
+    }
+    if (type.startsWith("array:")) {
+      if (!ts.isArrayLiteralExpression(e)) return bad("an array field takes an array literal");
+      const elem = type.slice("array:".length);
+      return { k: "array", items: e.elements.map((x) => this.cdoValue(x, elem, shown)) };
+    }
+    let num: number | undefined;
+    if (ts.isNumericLiteral(e)) num = Number(e.text);
+    else if (ts.isPrefixUnaryExpression(e) && e.operator === ts.SyntaxKind.MinusToken && ts.isNumericLiteral(stripParens(e.operand))) num = -Number((stripParens(e.operand) as ts.NumericLiteral).text);
+    const str = ts.isStringLiteral(e) || ts.isNoSubstitutionTemplateLiteral(e) ? e.text : undefined;
+    if (type === "bool") {
+      if (e.kind === ts.SyntaxKind.TrueKeyword || e.kind === ts.SyntaxKind.FalseKeyword) return { k: "bool", v: e.kind === ts.SyntaxKind.TrueKeyword };
+      return bad("expected true or false");
+    }
+    if (NUMERIC.has(type)) {
+      if (num === undefined || !Number.isFinite(num)) return bad("expected a number literal");
+      if ((type === "int" || type === "int64" || type === "byte") && !Number.isInteger(num)) return bad(`expected an integer for ${type}`);
+      return { k: "num", v: num };
+    }
+    if (type === "string" || type === "text") {
+      if (str === undefined) return bad("expected a string literal");
+      return { k: type === "text" ? "text" : "str", v: str };
+    }
+    if (type === "name") {
+      if (str !== undefined) return { k: "name", v: str };
+      if (ts.isCallExpression(e) && runtimeName(this.checker, e) === "nameOf") {
+        const a0 = e.arguments[0];
+        if (a0 && (ts.isStringLiteral(a0) || ts.isNoSubstitutionTemplateLiteral(a0))) return { k: "name", v: a0.text };
+      }
+      return bad("expected a string literal or nameOf(\"...\")");
+    }
+    if (/^(object|softobject):/.test(type)) {
+      if (ts.isCallExpression(e) && runtimeName(this.checker, e) === "asset") {
+        const ref = this.assetExpr(e, this.sp(e));
+        if (ref.k !== "assetRef") return bad("expected asset(Class, path)");
+        const q = ref.text.indexOf("'");
+        return { k: "asset", path: ref.text.slice(q + 1, -1) };
+      }
+      return bad("an object field takes asset(Class, \"path\") or null (an instance cannot be a class default)");
+    }
+    if (/^(class|softclass):/.test(type)) {
+      const ci = this.classArg(e);
+      if (!ci || ci.kind !== "class") return bad("expected a class");
+      this.classMeta[ci.path] = ci.meta;
+      return { k: "class", path: ci.path };
+    }
+    if (type.startsWith("struct:")) {
+      const path = type.slice("struct:".length);
+      const m = /^\/Script\/[A-Za-z0-9_]+\.([A-Za-z0-9_]+)$/.exec(path);
+      if (!m) return bad("only native (/Script) structs can be written as a class default; set a mod struct in the editor or in Begin Play");
+      if (!ts.isObjectLiteralExpression(e)) return bad("a struct field takes an object literal");
+      const fields: Record<string, CdoValue> = {};
+      for (const p of e.properties) {
+        if (!ts.isPropertyAssignment(p) || !(ts.isIdentifier(p.name) || ts.isStringLiteral(p.name))) return bad("only `Field: value` entries are supported in a struct default");
+        const ctx = this.checker.getContextualType(e);
+        const sym = ctx ? this.checker.getPropertyOfType(ctx, p.name.text) : undefined;
+        const ft = (sym ? bpTypeOfMember(sym) : undefined) ?? (sym ? bpTypeOf(this.checker, this.checker.getTypeOfSymbolAtLocation(sym, e)) : undefined);
+        if (ft === undefined) return bad(`struct field ${p.name.text} has no Blueprint type`);
+        fields[p.name.text] = this.cdoValue(p.initializer, ft, `${shown}.${p.name.text}`);
+      }
+      return { k: "struct", name: m[1]!, fields };
+    }
+    return bad("this field type has no class default form");
   }
 
   /** The Unreal default-value text of an own field's literal initializer, or undefined (after reporting ABFC2047/ABFC2015) when it is not a literal of the field type. */
@@ -946,16 +1166,71 @@ class HirBuilder {
     }
 
     const prop = this.checker.getPropertyOfType(parentType, name);
-    const fi = prop ? functionInfo(prop) : undefined;
+    let fi = prop ? functionInfo(prop) : undefined;
+    // not on the parent: an event or function of one of the class's interfaces (`@blueprint({ interfaces })`)
+    let viaInterface = false;
     if (!fi) {
-      this.sink.error("ABFC2060", `@override ${name}: the parent class has no event or function ${name} with Blueprint metadata (@bpPath)`, m.name);
+      for (const it of this.ifaceTypes) {
+        const ip = this.checker.getPropertyOfType(it.type, name);
+        const ifi = ip ? functionInfo(ip) : undefined;
+        if (ifi) {
+          fi = { ...ifi, owner: it.path };
+          viaInterface = true;
+          break;
+        }
+      }
+    }
+    if (!fi) {
+      const hint = this.ifaceTypes.length > 0 ? " or its interfaces" : " (an interface event needs the interface in @blueprint({ interfaces: [...] }))";
+      this.sink.error("ABFC2060", `@override ${name}: the parent class${hint} has no event or function ${name} with Blueprint metadata (@bpPath)`, m.name);
       return undefined;
     }
     if (fi.params.length !== params.length) {
       this.sink.error("ABFC2055", `@override ${name} takes ${params.length} parameter(s) but the parent declares ${fi.params.length}`, m.name);
       return undefined;
     }
-    return { node: m, kind, params: fi.params.map((p) => ({ name: p.pin, type: p.type })), paramSyms, overrideOf: fi.owner };
+    const fparams = fi.params.map((p) => ({ name: p.pin, type: p.type }));
+    // A parent function with outputs is overridden by a function graph (its entry and result nodes name the parent), not by an
+    // event. So is a member that only a Blueprint class declares: what a child can override there is a function graph (a weapon's
+    // GunStartFiring), and an event node for it comes out of the apply as a custom event GunStartFiring_1 (ABFC6003, 9 Nov PC run).
+    // A native event that a Blueprint stub lists again (ReceiveBeginPlay on a game class) stays an event, as before.
+    // An interface event without outputs is an event node naming the interface (as the editor's "Implement event" makes it).
+    if (fi.outs.length > 0 || (!viaInterface && !fi.owner.startsWith("/Script/") && !this.nativeDeclares(parentType, name))) {
+      if (fi.execOutputs !== null) {
+        this.sink.error("ABFC2099", `@override ${name}: overriding a parent function with exec outputs is not supported`, m.name);
+        return undefined;
+      }
+      const lone = fi.outs.length === 1 && fi.outs[0]!.pin === FUNCTION_RETURN_PIN;
+      // The override's entry must carry the parent function's access specifier. The backend reads it from the parent; a
+      // `@bpAccess protected` (or private) doc tag on the method states it when that fails ("Access specifier is not compatible").
+      const msym = this.checker.getSymbolAtLocation(m.name);
+      const accTag = msym ? bpTagsOfSymbol(msym).get("bpAccess")?.[0]?.trim() : undefined;
+      if (accTag !== undefined && accTag !== "public" && accTag !== "protected" && accTag !== "private") {
+        this.sink.error("ABFC2099", `@bpAccess of ${name} must be public, protected or private`, m.name);
+        return undefined;
+      }
+      return {
+        node: m,
+        kind: "function",
+        params: fparams,
+        paramSyms,
+        overrideOf: fi.owner,
+        access: accTag ?? "public",
+        ...(lone ? { returnType: fi.outs[0]!.type } : { outs: fi.outs, pinOfTs: fi.pinOfTs }),
+      };
+    }
+    return { node: m, kind, params: fparams, paramSyms, overrideOf: fi.owner };
+  }
+
+  /** True when a native (/Script) class among the ancestors of `type` declares the member `name` with Blueprint metadata. */
+  private nativeDeclares(type: ts.Type, name: string, seen = new Set<ts.Type>()): boolean {
+    if (seen.has(type)) return false;
+    seen.add(type);
+    const prop = this.checker.getPropertyOfType(type, name);
+    const fi = prop ? functionInfo(prop) : undefined;
+    if (fi?.owner.startsWith("/Script/")) return true;
+    if (!type.isClassOrInterface()) return false;
+    return this.checker.getBaseTypes(type).some((b) => this.nativeDeclares(b, name, seen));
   }
 
   private isHybrid(node: ts.ClassDeclaration): boolean {
@@ -991,6 +1266,9 @@ class HirBuilder {
     this.unitKind = sig.kind;
     this.unitName = name.text;
     this.unitReturn = sig.returnType;
+    this.unitOuts = sig.outs;
+    this.unitPinOfTs = sig.pinOfTs;
+    this.unitOverride = sig.overrideOf !== undefined;
     const body = this.stmts(m.body!.statements);
     const doc = docOf(m);
     return {
@@ -1000,6 +1278,7 @@ class HirBuilder {
       ...(doc !== undefined ? { doc } : {}),
       params: sig.params,
       ...(sig.kind === "function" ? { ...(sig.returnType !== undefined ? { returnType: sig.returnType } : {}), access: sig.access ?? "public" } : {}),
+      ...(sig.outs !== undefined ? { outputs: sig.outs.map((o) => ({ name: o.pin, type: o.type })) } : {}),
       body,
       span: this.sp(name),
     };
@@ -1022,6 +1301,13 @@ class HirBuilder {
       if (init.k === "cast") {
         const ok = next === undefined ? false : next.hir === undefined || consumesCast(next.hir, id);
         if (!ok) this.sink.error("ABFC2050", `cast result "${it.hir.name}" must be consumed by the next statement (if (!${it.hir.name}), if (${it.hir.name}) or ${it.hir.name}?.)`, it.node);
+        else if (next?.hir !== undefined && negatedIsValidOf(next.hir, id) && !bareReturn(next.hir)) {
+          this.sink.warning(
+            "ABFC2103",
+            `if (!isValid(${it.hir.name})) right after the cast: when the cast fails, the event ends here instead of running this branch. Write if (!${it.hir.name}) to run it when the cast fails.`,
+            next.node,
+          );
+        }
       } else if (init.k === "call" && init.execOutputs !== null) {
         const ok = next === undefined ? false : next.hir === undefined || consumesExec(next.hir, id);
         if (!ok) this.sink.error("ABFC2052", `exec result "${it.hir.name}" must be branched by the next statement (if (${it.hir.name}.exec === "...") )`, it.node);
@@ -1059,6 +1345,7 @@ class HirBuilder {
       if (this.unitKind !== "function") {
         f.fail("ABFC2099", "an @event or @override cannot return a value; put the logic in an undecorated method (a Blueprint function) to return one", node);
       }
+      if (this.unitOuts !== undefined) return this.outsReturn(node, node.expression, this.unitOuts);
       if (this.unitReturn === undefined) f.fail("ABFC2099", "a void function cannot return a value", node);
       const value = this.expr(node.expression, this.unitReturn);
       return { k: "return", value, span: this.sp(node) };
@@ -1093,7 +1380,9 @@ class HirBuilder {
     const id = this.nextLocal++;
     const fn = init.type === "result" ? this.callInfo.get(init) : undefined;
     if (sym) this.locals.set(sym, { id, name: d.name.text, type: init.type, poison: false, ...(fn ? { fn } : {}) });
-    return { k: "const", local: id, name: d.name.text, init, uses: sym ? this.countUses(sym, d.name) : 0, span: this.sp(node) };
+    const uses = sym ? this.countUses(sym, d.name) : 0;
+    const nextOnly = sym !== undefined && uses > 0 && this.usesOnlyInNext(node, sym, d.name, uses);
+    return { k: "const", local: id, name: d.name.text, init, uses, ...(nextOnly ? { nextOnly } : {}), span: this.sp(node) };
   }
 
   /** `await`: ABFC2086 inside a function (it finishes in one frame), otherwise unsupported. */
@@ -1106,6 +1395,29 @@ class HirBuilder {
       );
     }
     return this.sink.fail("ABFC2099", "await is not supported", node);
+  }
+
+  /** Whether all `uses` references to the const are inside the statement right after it (an if: its condition), which reads them once. */
+  private usesOnlyInNext(stmt: ts.Statement, sym: ts.Symbol, declName: ts.Node, uses: number): boolean {
+    const parent = stmt.parent;
+    if (!ts.isBlock(parent) && !ts.isSourceFile(parent)) return false;
+    const list = parent.statements;
+    const next = list[list.indexOf(stmt) + 1];
+    if (!next) return false;
+    // an if reads its condition once, before either branch runs; only uses in the condition count
+    const scope: ts.Node | undefined = ts.isIfStatement(next)
+      ? next.expression
+      : ts.isExpressionStatement(next) || ts.isVariableStatement(next) || ts.isReturnStatement(next)
+        ? next
+        : undefined;
+    if (!scope) return false;
+    let n = 0;
+    const walk = (x: ts.Node): void => {
+      if (ts.isIdentifier(x) && x !== declName && this.checker.getSymbolAtLocation(x) === sym) n++;
+      ts.forEachChild(x, walk);
+    };
+    walk(scope);
+    return n === uses;
   }
 
   private countUses(sym: ts.Symbol, declName: ts.Node): number {
@@ -1137,9 +1449,31 @@ class HirBuilder {
     if (ts.isCallExpression(e) && ts.isPropertyAccessExpression(e.expression) && e.expression.name.text === "forEach" && this.isArrayNode(e.expression.expression)) {
       return this.forEachCall(e, e.expression, this.sp(node));
     }
+    if (ts.isCallExpression(e) && runtimeName(this.checker, e) === "bindEvent") return this.bindEvent(e, this.sp(node));
     const h = this.expr(e);
-    if (h.k !== "call" && h.k !== "optional" && h.k !== "callOwn") f.fail("ABFC2099", "this expression statement has no effect", e);
+    // spawnActor and createWidget have exec pins: a statement that drops the result still spawns or creates
+    if (h.k !== "call" && h.k !== "optional" && h.k !== "callOwn" && h.k !== "spawn" && h.k !== "createWidget") f.fail("ABFC2099", "this expression statement has no effect", e);
     return { k: "expr", e: h, span: this.sp(node) };
+  }
+
+  /** `bindEvent(source, "Dispatcher", target, "Function")` as a statement. */
+  private bindEvent(e: ts.CallExpression, sp: Span): HirStmt {
+    const f: DiagSink = this.sink;
+    const [srcArg, dispArg, tgtArg, fnArg] = e.arguments;
+    if (!srcArg || !dispArg || !tgtArg || !fnArg || e.arguments.length !== 4) return f.fail("ABFC2099", 'bindEvent(source, "Dispatcher", target, "Function") takes four arguments', e);
+    if (!ts.isStringLiteral(dispArg) || !ts.isStringLiteral(fnArg)) return f.fail("ABFC2099", "bindEvent: the dispatcher and function names must be string literals", !ts.isStringLiteral(dispArg) ? dispArg : fnArg);
+    const source = this.expr(srcArg);
+    if (!source.type.startsWith("object:")) return f.fail("ABFC2099", "bindEvent: the source must be an object", srcArg);
+    const sourceClass = source.type.slice("object:".length);
+    if (stripParens(tgtArg).kind === ts.SyntaxKind.ThisKeyword) {
+      // an own event: its delegate pin feeds Add Delegate straight away
+      const own = this.ownSigs.get(fnArg.text);
+      if (!own || own.kind !== "event") return f.fail("ABFC2054", `bindEvent(..., this, "${fnArg.text}"): ${fnArg.text} must be an own @event method`, fnArg);
+      return { k: "bind", source, sourceClass, dispatcher: dispArg.text, target: null, fn: fnArg.text, ownEvent: true, span: sp };
+    }
+    const target = this.expr(tgtArg);
+    if (!target.type.startsWith("object:")) return f.fail("ABFC2099", "bindEvent: the target must be an object", tgtArg);
+    return { k: "bind", source, sourceClass, dispatcher: dispArg.text, target, fn: fnArg.text, span: sp };
   }
 
   private assign(e: ts.BinaryExpression): HirStmt {
@@ -1152,12 +1486,35 @@ class HirBuilder {
       if (!ts.isNumericLiteral(r) || r.text !== "0") return f.fail("ABFC2099", "only `<array>.length = 0` is supported (it clears the array)", e.right);
       return { k: "arrayOp", op: "clear", array: self, span: this.sp(e) };
     }
+    if (ts.isElementAccessExpression(left) && this.isArrayNode(left.expression)) {
+      // this.Arr[i] = x: Set Array Elem (Array_Set, bSizeToFit false), on an own array only, like push and splice
+      const self = this.selfArray(left.expression);
+      if (!self) return f.fail("ABFC2041", ARRAY_OWN_ONLY, left.expression);
+      const index = this.expr(left.argumentExpression, "int");
+      if (kindOfBpType(index.type) !== "int") return f.fail("ABFC2012", `an array index must be an int, not ${index.type}`, left.argumentExpression);
+      const elem = self.type.slice("array:".length);
+      return { k: "arrayOp", op: "set", array: self, index, value: this.expr(e.right, elem), span: this.sp(e) };
+    }
+    if (ts.isPropertyAccessExpression(left) && left.expression.kind !== ts.SyntaxKind.ThisKeyword) {
+      // other.Var = value: a Set node on another object (a spawned actor's exposed variable)
+      const sym = this.checker.getSymbolAtLocation(left.name);
+      const path = sym ? bpPathOf(sym) : undefined;
+      const mp = path === undefined ? undefined : splitMemberPath(path);
+      if (!sym || !mp) return f.fail("ABFC2060", `member ${left.name.text} has no Blueprint metadata (@bpPath)`, left.name);
+      const type = bpTypeOfMember(sym);
+      if (type === undefined || ts.isMethodDeclaration(sym.valueDeclaration ?? left)) return f.fail("ABFC2099", `${left.name.text} is not a Blueprint variable`, left.name);
+      if (/^(array|map|set):/.test(type)) return f.fail("ABFC2041", "an array, Map or Set of another object cannot be assigned; use its own functions", left);
+      const obj = this.expr(left.expression);
+      if (!obj.type.startsWith("object:")) return f.fail("ABFC2099", "assignment target must be an object", left.expression);
+      return { k: "setOn", obj, owner: mp.owner, name: mp.name, type, value: this.expr(e.right, type), span: this.sp(e) };
+    }
     if (!ts.isPropertyAccessExpression(left) || left.expression.kind !== ts.SyntaxKind.ThisKeyword) {
-      return f.fail("ABFC2099", "assignment is only supported as this.<variable> = value", e);
+      return f.fail("ABFC2099", "assignment is only supported as this.<variable> = value, other.<variable> = value or this.<array>[i] = value", e);
     }
     const sym = this.checker.getSymbolAtLocation(left.name);
     if (!sym) return f.fail("ABFC2060", `member ${left.name.text} has no Blueprint metadata (@bpPath)`, left.name);
     const ownF = this.ownFields.get(sym);
+    if (ownF?.component !== undefined) return f.fail("ABFC2105", `component ${ownF.name} cannot be assigned; set its properties in component(...) or call its functions`, left.name);
     const type = ownF?.type ?? bpTypeOfMember(sym);
     if (type === undefined) {
       if (bpPathOf(sym) === undefined) f.fail("ABFC2060", `member ${left.name.text} has no Blueprint metadata (@bpPath)`, left.name);
@@ -1720,7 +2077,11 @@ class HirBuilder {
         if (memberSym && bpPathOf(memberSym) !== undefined) f.fail("ABFC2099", `${name} is not a Blueprint variable`, node.name);
         return f.fail("ABFC2060", `member ${name} has no Blueprint metadata (@bpPath)`, node.name);
       }
-      const bpName = splitMemberPath(bpPathOf(memberSym!) ?? "")?.name ?? name;
+      const mp = splitMemberPath(bpPathOf(memberSym!) ?? "");
+      const bpName = mp?.name ?? name;
+      // a member a parent class declares: the get names that class, so the backend's scratch Blueprint (an Actor) can
+      // build its pins (a self-context get of IsDepleted on a game crate had none)
+      if (mp && mp.owner !== this.cls.classPath) return { k: "getSelf", name: bpName, owner: mp.owner, type, span: sp };
       return { k: "getSelf", name: bpName, type, span: sp };
     }
 
@@ -1743,6 +2104,18 @@ class HirBuilder {
       const pin = local.fn.pinOfTs.get(name) ?? name;
       const o = local.fn.outs.find((x) => x.pin === pin);
       if (!o) return f.fail("ABFC2099", `${local.name} has no output "${name}"`, node.name);
+      return { k: "out", call: obj, pin, type: o.type, span: sp };
+    }
+    // `Lib.Fn(...).Out`: an output read straight off a call (no const needed); a call with exec outputs still needs its
+    // const, because the next statement branches on `.exec`
+    const direct = obj.type === "result" ? this.callInfo.get(obj) : undefined;
+    if (direct) {
+      if (direct.execOutputs !== null) {
+        return f.fail("ABFC2052", "the result of a function with exec outputs must be stored in a const and branched by the next statement", node);
+      }
+      const pin = direct.pinOfTs.get(name) ?? name;
+      const o = direct.outs.find((x) => x.pin === pin);
+      if (!o) return f.fail("ABFC2099", `${direct.name} has no output "${name}"`, node.name);
       return { k: "out", call: obj, pin, type: o.type, span: sp };
     }
 
@@ -1768,13 +2141,34 @@ class HirBuilder {
     return { k: "getOn", obj, owner: mp.owner, name: mp.name, type, span: sp };
   }
 
-  private classArg(arg: ts.Expression | undefined): { path: string; meta: string; castPin: string | null; sym: ts.Symbol } | undefined {
+  private classArg(arg: ts.Expression | undefined): { path: string; meta: string; castPin: string | null; sym: ts.Symbol; kind: "class" | "struct" | "enum" } | undefined {
     if (!arg) return undefined;
     const s = this.checker.getSymbolAtLocation(arg);
     if (!s) return undefined;
     const sym = resolveAlias(this.checker, s);
     const ci = classInfo(sym);
-    return ci ? { path: ci.path, meta: ci.meta, castPin: ci.castPin, sym } : undefined;
+    return ci ? { path: ci.path, meta: ci.meta, castPin: ci.castPin, sym, kind: ci.kind } : undefined;
+  }
+
+  /**
+   * `asset(Class, "/Mod/Dir/Asset")` or `asset(Class, "@mod/Dir/Asset")`: a hard reference to an existing asset, written as the
+   * default object of the pin it is passed to (no load node, so it cooks with the Blueprint). Only valid as a call argument.
+   */
+  private assetExpr(node: ts.CallExpression, sp: Span): HirExpr {
+    const f: DiagSink = this.sink;
+    const [clsArg, pathArg] = node.arguments;
+    if (node.arguments.length !== 2 || !pathArg || !(ts.isStringLiteral(pathArg) || ts.isNoSubstitutionTemplateLiteral(pathArg))) {
+      return f.fail("ABFC2099", "asset(Class, path) takes a class and one string literal path", node);
+    }
+    const ci = this.classArg(clsArg);
+    if (!ci) return f.fail("ABFC2060", "the asset class has no Blueprint metadata (@bpPath)", clsArg ?? node);
+    let path = pathArg.text;
+    if (path.startsWith("@mod/")) path = `/${this.mod}/${path.slice("@mod/".length)}`;
+    if (!/^\/[A-Za-z0-9_]+(\/[A-Za-z0-9_]+)+(\.[A-Za-z0-9_]+)?$/.test(path) || path.startsWith("/Script/")) {
+      return f.fail("ABFC2099", `asset path "${pathArg.text}" must be a package path such as "/Game/Dir/Asset" or "@mod/Dir/Asset"`, pathArg);
+    }
+    if (!path.includes(".")) path = `${path}.${path.slice(path.lastIndexOf("/") + 1)}`;
+    return { k: "assetRef", text: `${ci.path}'${path}'`, type: `object:${ci.path}`, span: sp };
   }
 
   private callExpr(node: ts.CallExpression, sp: Span): HirExpr {
@@ -1809,12 +2203,18 @@ class HirBuilder {
         if (kind !== "int") return f.fail("ABFC2012", `idiv takes int operands, not ${a.type}`, node);
         return { k: "arith", op: "/", kind: "int", a, b, type: "int", span: sp };
       }
+      if (rt === "asset") return this.assetExpr(node, sp);
       if (rt === "createWidget") return this.createWidgetExpr(node, sp);
+      if (rt === "getWorldSubsystem") return this.subsystemExpr(node, sp);
       if (rt === "spawnActor") return this.spawnExpr(node, sp);
+      if (rt === "component") return f.fail("ABFC2105", "component(Class, ...) is only valid as the initializer of a field of an Actor class", node);
+      if (rt === "message") return f.fail("ABFC2099", "message(obj, Interface) is only valid as the target of a call of an interface function: message(obj, I_X_C).Fn(...)", node);
       if (callee.text === "eval") return f.fail("ABFC2020", "eval is not supported", node);
       return f.fail("ABFC2099", `call of "${callee.text}" is not supported`, node);
     }
     if (!ts.isPropertyAccessExpression(callee)) return f.fail("ABFC2099", "only method and library calls are supported", node);
+
+    if (callee.expression.kind === ts.SyntaxKind.SuperKeyword) return this.superCall(node, callee, sp);
 
     const ck = this.containerKind(callee.expression);
     if (ck !== undefined) return this.containerCall(node, callee, ck, sp);
@@ -1869,7 +2269,17 @@ class HirBuilder {
     }
 
     let target: HirExpr | null = null;
-    if (fi.static) {
+    // `message(obj, I_X_C).Fn(...)`: a Message node whose self pin is obj (no cast; a non-implementer ignores it)
+    const msg = ts.isCallExpression(callee.expression) && runtimeName(this.checker, callee.expression) === "message" ? callee.expression : undefined;
+    if (msg) {
+      const [objArg, ifArg] = msg.arguments;
+      const ci = this.classArg(ifArg);
+      if (msg.arguments.length !== 2 || !objArg || !ci || ci.kind !== "class") return f.fail("ABFC2099", "message(obj, Interface) takes an object and an interface class from the stubs", msg);
+      if (fi.owner !== ci.path) return f.fail("ABFC2099", `${fi.name} is not a function of ${ci.path}`, callee.name);
+      if (fi.static || fi.pure) return f.fail("ABFC2099", `${fi.name} cannot be messaged (static or pure)`, callee.name);
+      this.classMeta[ci.path] = ci.meta;
+      target = this.expr(objArg);
+    } else if (fi.static) {
       const ns = this.checker.getSymbolAtLocation(callee.expression);
       if (ns) this.noteSymbol(resolveAlias(this.checker, ns));
     } else if (callee.expression.kind !== ts.SyntaxKind.ThisKeyword) {
@@ -1885,9 +2295,12 @@ class HirBuilder {
         if (p.default === undefined) f.fail("ABFC2099", `argument ${p.pin} of ${fi.name} has no default`, a);
         return;
       }
+      // `[]` for an array input: the pin stays unwired, which Blueprint reads as an empty array (LineTraceSingle's ActorsToIgnore)
+      if (ts.isArrayLiteralExpression(stripParens(a)) && (stripParens(a) as ts.ArrayLiteralExpression).elements.length === 0 && p.type.startsWith("array:")) return;
       args.push({ pin: p.pin, value: p.type === "unsupported:delegate" ? this.delegateArg(a) : this.expr(a, p.type) });
     });
 
+    // A single output that is not ReturnValue stays a result object, as the stubs type it (`GetOverlappingActors(...): { OverlappingActors: Actor[] }`).
     const multi = fi.execOutputs !== null || fi.outs.length > 1 || (fi.outs.length === 1 && fi.outs[0]?.pin !== "ReturnValue");
     const type = multi ? "result" : (fi.outs[0]?.type ?? "void");
     const out: HirExpr = {
@@ -1901,10 +2314,75 @@ class HirBuilder {
       args,
       outs: fi.outs,
       type,
+      ...(msg ? { message: true as const } : {}),
       span: sp,
     };
     this.callInfo.set(out, fi);
     return out;
+  }
+
+  /** `return { Out: v, ... }` in an override of a parent function with named outputs: one value per out pin, all of them. */
+  private outsReturn(node: ts.ReturnStatement, e: ts.Expression, outs: Array<{ pin: string; type: BpType }>): HirStmt {
+    const f: DiagSink = this.sink;
+    let x = e;
+    while (ts.isParenthesizedExpression(x)) x = x.expression;
+    if (!ts.isObjectLiteralExpression(x)) return f.fail("ABFC2099", `${this.unitName} returns its outputs as an object literal: return { ${outs.map((o) => `${o.pin}: ...`).join(", ")} }`, e);
+    const fields: Array<{ pin: string; value: HirExpr }> = [];
+    for (const p of x.properties) {
+      let name: string;
+      let init: ts.Expression;
+      if (ts.isPropertyAssignment(p) && (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name))) {
+        name = p.name.text;
+        init = p.initializer;
+      } else if (ts.isShorthandPropertyAssignment(p)) {
+        name = p.name.text;
+        init = p.name;
+      } else return f.fail("ABFC2099", "only `name: value` and shorthand properties are supported in a returned outputs literal", p);
+      const pin = this.unitPinOfTs?.get(name) ?? name;
+      const o = outs.find((y) => y.pin === pin);
+      if (!o) return f.fail("ABFC2099", `${this.unitName} has no output "${name}"`, p);
+      if (fields.some((y) => y.pin === pin)) return f.fail("ABFC2099", `output "${name}" is given twice`, p);
+      fields.push({ pin, value: this.expr(init, o.type) });
+    }
+    const missing = outs.filter((o) => !fields.some((y) => y.pin === o.pin));
+    if (missing.length > 0) return f.fail("ABFC2099", `${this.unitName} must return every output (missing ${missing.map((o) => o.pin).join(", ")})`, e);
+    return { k: "return", outs: fields, span: this.sp(node) };
+  }
+
+  /** `super.X(args)` inside `@override X`: the parent's implementation (Blueprint "Add Call to Parent Function"). */
+  private superCall(node: ts.CallExpression, callee: ts.PropertyAccessExpression, sp: Span): HirExpr {
+    const f: DiagSink = this.sink;
+    const name = callee.name.text;
+    if (!this.unitOverride || name !== this.unitName) {
+      return f.fail("ABFC2099", `super.${name}() can only be called inside @override ${name} (it calls the parent's ${name})`, node);
+    }
+    const sym = this.checker.getSymbolAtLocation(callee.name);
+    const fi = sym ? functionInfo(sym) : undefined;
+    if (!fi) return f.fail("ABFC2060", `function ${name} has no Blueprint metadata (@bpPath)`, callee.name);
+    if (fi.execOutputs !== null) return f.fail("ABFC2099", `super.${name}() is not supported for a parent function with exec outputs`, node);
+    const args: Array<{ pin: string; value: HirExpr }> = [];
+    node.arguments.forEach((a, i) => {
+      const p = fi.params[i];
+      if (!p) f.fail("ABFC2099", `too many arguments for ${name}`, a);
+      args.push({ pin: p.pin, value: this.expr(a, p.type) });
+    });
+    // outputs as a normal call types them: one ReturnValue is the value, anything else a result object (`super.Pick(i).Ok`)
+    const multi = fi.outs.length > 1 || (fi.outs.length === 1 && fi.outs[0]?.pin !== "ReturnValue");
+    const type = multi ? "result" : (fi.outs[0]?.type ?? "void");
+    const out: HirExpr = { k: "call", owner: this.cls.parent, name, target: null, static: false, pure: false, execOutputs: null, args, outs: fi.outs, type, parentCall: true, span: sp };
+    this.callInfo.set(out, fi);
+    return out;
+  }
+
+  /** `getWorldSubsystem(Class)`: the native world subsystem of that class (a pure Get Subsystem node). */
+  private subsystemExpr(node: ts.CallExpression, sp: Span): HirExpr {
+    const f: DiagSink = this.sink;
+    if (node.arguments.length !== 1) return f.fail("ABFC2099", "getWorldSubsystem(Class) takes one argument, the subsystem class", node);
+    const ci = this.classArg(node.arguments[0]);
+    if (!ci) return f.fail("ABFC2060", "the subsystem class has no Blueprint metadata (@bpPath)", node.arguments[0] ?? node);
+    if (!ci.path.startsWith("/Script/")) return f.fail("ABFC2099", `getWorldSubsystem takes a native subsystem class (/Script/...), not ${ci.path}`, node.arguments[0]!);
+    this.noteSymbol(ci.sym);
+    return { k: "subsystem", cls: ci.path, type: `object:${ci.path}`, span: sp };
   }
 
   private createWidgetExpr(node: ts.CallExpression, sp: Span): HirExpr {
@@ -1925,6 +2403,8 @@ class HirBuilder {
     if (!ci) return f.fail("ABFC2060", "the spawned class has no Blueprint metadata (@bpPath)", clsArg);
     this.classMeta[ci.path] = ci.meta;
     let owner: HirExpr | undefined;
+    let instigator: HirExpr | undefined;
+    let transform: HirExpr | undefined;
     let collision: string | undefined;
     let scale: string | undefined;
     if (optsArg) {
@@ -1935,18 +2415,24 @@ class HirBuilder {
         const init = p.initializer;
         const text = ts.isStringLiteral(init) || ts.isNoSubstitutionTemplateLiteral(init) ? init.text : undefined;
         if (key === "owner") owner = this.expr(init);
+        else if (key === "transform") {
+          transform = this.expr(init, "struct:/Script/CoreUObject.Transform");
+          if (transform.type !== "struct:/Script/CoreUObject.Transform") return f.fail("ABFC2056", "spawnActor option transform must be a Transform", init);
+        }
         else if (key === "collisionHandlingOverride" || key === "transformScaleMethod") {
           if (text === undefined) return f.fail("ABFC2056", `spawnActor option ${key} must be a string literal (the enum text)`, init);
           if (key === "collisionHandlingOverride") collision = text;
           else scale = text;
-        } else if (key === "instigator") return f.fail("ABFC2056", "spawnActor option instigator is not supported yet", p);
-        else return f.fail("ABFC2056", `unknown spawnActor option "${key}" (owner, collisionHandlingOverride, transformScaleMethod)`, p.name);
+        } else if (key === "instigator") instigator = this.expr(init);
+        else return f.fail("ABFC2056", `unknown spawnActor option "${key}" (owner, instigator, transform, collisionHandlingOverride, transformScaleMethod)`, p.name);
       }
     }
     return {
       k: "spawn",
       cls: ci.path,
       ...(owner ? { owner } : {}),
+      ...(instigator ? { instigator } : {}),
+      ...(transform ? { transform } : {}),
       ...(collision !== undefined ? { collision } : {}),
       ...(scale !== undefined ? { scale } : {}),
       type: `object:${ci.path}`,
@@ -2003,8 +2489,8 @@ class HirBuilder {
           const t = bpTypeOf(this.checker, this.checker.getTypeAtLocation(x));
           return t === undefined ? undefined : kindOfBpType(t);
         });
-        if (kinds.includes("int") || kinds.includes("byte")) f.fail("ABFC2010", "`/` on integer values is not supported; use idiv(a, b)", node);
-        return f.fail("ABFC2099", "`/` on real values is not supported", node);
+        if (kinds.includes("int") || kinds.includes("byte")) return f.fail("ABFC2010", "`/` on integer values is not supported; use idiv(a, b)", node);
+        return this.arithExpr(node, "/", sp); // Divide_DoubleDouble
       }
       default:
         return f.fail("ABFC2099", `operator ${node.operatorToken.getText()} is not supported`, node.operatorToken);
@@ -2044,7 +2530,7 @@ class HirBuilder {
     return { a, b, kind };
   }
 
-  private arithExpr(node: ts.BinaryExpression, op: "+" | "-" | "*", sp: Span): HirExpr {
+  private arithExpr(node: ts.BinaryExpression, op: "+" | "-" | "*" | "/", sp: Span): HirExpr {
     const { a, b, kind } = this.numericOperands(node);
     return { k: "arith", op, kind, a, b, type: kind === "int" ? "int" : "double", span: sp };
   }

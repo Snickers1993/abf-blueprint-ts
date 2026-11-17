@@ -190,20 +190,19 @@ test("tag spec: one comment box per unit, above and left of the origin", () => {
   assert.match(add[0]!.props![2]!, /^NodeHeight=\d+$/);
 });
 
-test("applyPlan on the native route: one main call, then the tag pass; node ids and tag names are mapped", async () => {
+test("applyPlan on the native route: one main call that carries the comment boxes; node ids and tag names are mapped", async () => {
   const c = caps(true, true);
   const ids = nodeIdsFor(plan, c);
-  const backend = new FakeBackend((call) =>
-    call.label === "main"
-      ? result({ assets: [{ asset: asset.asset, node_ids: ids }] })
-      : result({ assets: [{ asset: asset.asset, node_ids: { "graph:0": { cmt_UpdateTarget: "EdGraphNode_Comment_0" } } }] }),
-  );
+  const withTag = { ...ids, "graph:0": { ...(ids["graph:0"] ?? {}), cmt_UpdateTarget: "EdGraphNode_Comment_0" } };
+  const backend = new FakeBackend(() => result({ assets: [{ asset: asset.asset, node_ids: withTag }] }));
   const timings: string[] = [];
   const out = await applyPlan(backend, plan, c, profile, { cacheDir: "cache", record: (s) => timings.push(s) });
   assert.equal(out.ok, true);
-  assert.deepEqual(backend.calls.map((x) => x.label), ["main", "tags"]);
+  assert.deepEqual(backend.calls.map((x) => x.label), ["main"]);
   assert.equal(backend.calls[0]!.specs.length, 1);
-  assert.deepEqual(timings, ["apply.main", "apply.tags"]);
+  const sent = backend.calls[0]!.specs[0]! as { graphs: Array<{ add: Array<{ id: string }> }> };
+  assert.ok(sent.graphs[0]!.add.some((n) => n.id === "cmt_UpdateTarget"), "the comment box is in the main spec");
+  assert.deepEqual(timings, ["apply.main"]);
   const a = out.perAsset[0]!;
   assert.equal(a.nodeIds["event:UpdateTarget/cast0"], realName("UpdateTarget_cast0"));
   assert.equal(Object.keys(a.nodeIds).length, unit.nodes.length);
@@ -212,13 +211,35 @@ test("applyPlan on the native route: one main call, then the tag pass; node ids 
   assert.equal(a.tagWarning, undefined);
 });
 
-test("applyPlan: a failing tag pass is a warning, a failing main pass skips the tags", async () => {
+test("applyPlan with ABFC_TAG_PASS=separate: one main call, then the tag pass; node ids and tag names are mapped", async () => {
+  process.env["ABFC_TAG_PASS"] = "separate";
+  try {
+    const c = caps(true, true);
+    const ids = nodeIdsFor(plan, c);
+    const backend = new FakeBackend((call) =>
+      call.label === "main"
+        ? result({ assets: [{ asset: asset.asset, node_ids: ids }] })
+        : result({ assets: [{ asset: asset.asset, node_ids: { "graph:0": { cmt_UpdateTarget: "EdGraphNode_Comment_0" } } }] }),
+    );
+    const timings: string[] = [];
+    const out = await applyPlan(backend, plan, c, profile, { cacheDir: "cache", record: (s) => timings.push(s) });
+    assert.equal(out.ok, true);
+    assert.deepEqual(backend.calls.map((x) => x.label), ["main", "tags"]);
+    assert.deepEqual(timings, ["apply.main", "apply.tags"]);
+    assert.deepEqual(out.perAsset[0]!.tagNames, { "event:UpdateTarget": "EdGraphNode_Comment_0" });
+  } finally {
+    delete process.env["ABFC_TAG_PASS"];
+  }
+});
+
+test("applyPlan: a failing separate tag pass is a warning, a failing main pass skips the tags", async () => {
   const c = caps(true, true);
   const ids = nodeIdsFor(plan, c);
   const tagFails = new FakeBackend((call) =>
     call.label === "main" ? result({ assets: [{ asset: asset.asset, node_ids: ids }] }) : result({ ok: false, error: "nope" }),
   );
-  const a = await applyPlan(tagFails, plan, c, profile, { cacheDir: "cache", record: () => {} });
+  process.env["ABFC_TAG_PASS"] = "separate";
+  const a = await applyPlan(tagFails, plan, c, profile, { cacheDir: "cache", record: () => {} }).finally(() => delete process.env["ABFC_TAG_PASS"]);
   assert.equal(a.ok, true);
   assert.equal(a.perAsset[0]!.tagWarning?.code, "ABFC5101");
   assert.equal(a.perAsset[0]!.tagName, null);
@@ -392,4 +413,44 @@ test("a removed function graph has no graph entry; a recreated empty one has non
   const spec2 = renderMainSpec(made, caps(true, true), profile);
   assert.deepEqual(spec2.functions!.map((f) => f.name), ["noop"]);
   assert.deepEqual(spec2.graphs, []);
+});
+
+test("interfaces: an interface function graph goes to its interface entry, not to functions; components carry ensure and values", () => {
+  const IF = "/Game/Fake/I_Use.I_Use_C";
+  const a = fnAsset({
+    interfaces: [IF],
+    functions: [
+      { name: "CanUse", inputs: [], outputs: [{ name: "ReturnValue", type: "bool" }], access: "public", override: IF },
+      { name: "Own", inputs: [], outputs: [], access: "public" },
+    ],
+    components: [{ name: "Lid", class: "/Script/Engine.StaticMeshComponent", attachTo: "Mesh", props: { bHiddenInGame: { k: "bool", v: true } }, origin: unit.origin }],
+  });
+  const spec = renderMainSpec(a, caps(true, true), profile);
+  assert.deepEqual(spec.functions?.map((f) => f.name), ["Own"]);
+  assert.deepEqual(spec.interfaces, [{ class: IF, functions: [{ name: "CanUse", inputs: [], outputs: [{ name: "ReturnValue", type: "bool" }] }] }]);
+  assert.deepEqual(spec.components, [{ name: "Lid", class: "/Script/Engine.StaticMeshComponent", parent: "Mesh", ensure: true, values: { bHiddenInGame: { k: "bool", v: true } } }]);
+});
+
+test("applyPlan: an asset re-planned only for its structure (components, interfaces) still goes through the main pass", async () => {
+  const c = caps(true, true);
+  const base = planOf(ir).assets[0]!;
+  const structural = {
+    ...base,
+    units: [],
+    variables: [],
+    interfaces: ["/Game/Fake/I_Use.I_Use_C"],
+    components: [{ name: "Lid", class: "/Script/Engine.StaticMeshComponent", props: {}, origin: unit.origin }],
+    defaults: { classPath: `${base.asset}.X_C`, values: { "abfc:structure": "0123456789abcdef0123456789abcdef" }, hash: "h" },
+  };
+  const be = new FakeBackend(() => result({ assets: [{ asset: base.asset, node_ids: {} }] }));
+  await applyPlan(be, { mod: "TestMod", assets: [structural] }, c, profile, { cacheDir: "cache", record: () => {} });
+  assert.equal(be.calls[0]!.label, "main");
+  assert.equal(be.calls[0]!.specs[0]!.components.length, 1);
+  assert.equal(be.calls[0]!.specs[0]!.interfaces.length, 1);
+
+  // class defaults alone (no components, no interfaces) stay out of the main pass
+  const plain = { ...base, units: [], variables: [], defaults: { classPath: `${base.asset}.X_C`, values: {}, hash: "h" } };
+  const be2 = new FakeBackend(() => result({ assets: [{ asset: base.asset, node_ids: {} }] }));
+  await applyPlan(be2, { mod: "TestMod", assets: [plain] }, c, profile, { cacheDir: "cache", record: () => {} });
+  assert.ok(!be2.calls.some((x) => x.label === "main"));
 });

@@ -38,8 +38,12 @@ import {
   previousNames,
   pruneManifestsToStage,
   readAsset,
+  missSummary,
+  readCacheFor,
+  readCacheOf,
   sourceMapOf,
   since,
+  useReadCache,
 } from "./common.js";
 import { refreshTagsFile } from "../tags.js";
 import { deleteRetiredRows, runAssetOps, runParentChange } from "./assetops.js";
@@ -193,6 +197,10 @@ async function buildInner(ctx: CliContext, session: BackendSession, rec: Recorde
     warn: (d) => output.diag(d),
     progress: ctx.progress,
   });
+  // Reads of assets whose stage files (and referenced mod files) are byte-identical to an earlier read come from .abfc/cache/reads,
+  // not the editor: after a re-sync that is every asset nobody saved. `--full` (build and publish) reads everything from the editor.
+  const fullRead = args.flags.full;
+  useReadCache(ctx, fullRead ? null : readCacheFor(ctx, info, stage.stagingPath));
   // The assets the Mod Editor saved (their files caused the re-sync): their class defaults are applied again, TypeScript wins.
   const editedInMod = new Set<string>();
   for (const rel of changedInMod) {
@@ -204,7 +212,14 @@ async function buildInner(ctx: CliContext, session: BackendSession, rec: Recorde
   // keeps the published assets that were not touched.
   if (resynced && changedInMod.length === 0) for (const a of owned) editedInMod.add(a.path.toLowerCase());
   // A stage copied from the mod again holds no unpublished work: the manifests follow before anything is planned from them.
-  if (resynced) await pruneManifestsToStage(ctx, backend, mod, { ir, owned });
+  if (resynced) {
+    const tPrune = performance.now();
+    const before = readCacheOf(ctx)?.missed.length ?? 0;
+    await pruneManifestsToStage(ctx, backend, mod, { ir, owned });
+    const why = missSummary(ctx, before);
+    if (why !== "") output.info(`after the re-sync, ${why}`, "dim");
+    rec.record("build.prune", since(tPrune), true, (readCacheOf(ctx)?.missed.length ?? 0) - before);
+  }
   rec.record("build.stage", since(tStage));
   // Stage-only operations: renames and deletes (and their repetition after a re-sync) run now, before anything is read or planned.
   const tOps = performance.now();
@@ -315,7 +330,7 @@ async function buildInner(ctx: CliContext, session: BackendSession, rec: Recorde
   // Assets that cannot have anything to plan are not read (no drift check there; `abfc status` still reads everything), unless `readAll`.
   const tRead = performance.now();
   const existing = owned.filter((a) => !missing.has(a.path));
-  const toRead = readAll ? new Set(existing.map((a) => a.path)) : assetsNeedingRead({ ...ir, assets: existing }, { manifests, stage, forceReplan, directorRows: caps.classManagerRows, editedInMod });
+  const toRead = readAll || fullRead ? new Set(existing.map((a) => a.path)) : assetsNeedingRead({ ...ir, assets: existing }, { manifests, stage, forceReplan, directorRows: caps.classManagerRows, editedInMod, variableDefaults: caps.variableDefaults });
   // The asset ops edited the nodes of renamed assets and of their referencers: those are read too, so drifted units are replaced now
   // (editedByAbfc) instead of reading as editor edits in `abfc status` and blaming the modder at the next real change.
   for (const p of assetOpsOutcome.edited ?? []) if (existing.some((a) => a.path === p)) toRead.add(p);
@@ -331,6 +346,8 @@ async function buildInner(ctx: CliContext, session: BackendSession, rec: Recorde
     snapshotVariableTypes.set(path, new Map(parsed.variables.map((v) => [v.name, v.type])));
     snapshotParents.set(path, parsed.parentClass);
   };
+  const hitsBefore = readCacheOf(ctx)?.stats.hits ?? 0;
+  const missesBefore = readCacheOf(ctx)?.missed.length ?? 0;
   if (readAssets.length > 0) {
     await ctx.progress.run(
       "Reading owned assets",
@@ -343,7 +360,11 @@ async function buildInner(ctx: CliContext, session: BackendSession, rec: Recorde
       {
         total: readAssets.length,
         slowHint: SLOW_BACKEND_HINT,
-        done: () => `Read ${readAssets.length} asset(s)${skipped.length > 0 ? `, ${skipped.length} unchanged not read` : ""}`,
+        done: () => {
+          const cached = (readCacheOf(ctx)?.stats.hits ?? 0) - hitsBefore;
+          const why = missSummary(ctx, missesBefore);
+          return `Read ${readAssets.length} asset(s)${cached > 0 ? ` (${cached} unchanged since an earlier read, from the cache)` : ""}${skipped.length > 0 ? `, ${skipped.length} unchanged not read` : ""}${why !== "" ? `; ${why}` : ""}`;
+        },
       },
     );
   }
@@ -387,6 +408,7 @@ async function buildInner(ctx: CliContext, session: BackendSession, rec: Recorde
 
   const planIr: IrModule = { ...ir, assets: [...structAssets, ...owned.filter((a) => toRead.has(a.path) || missing.has(a.path))] };
   const planned = planBuild(planIr, {
+    protectEditorEdits: config.protectEditorEdits === true && !args.flags.replaceEditorEdits,
     manifests,
     snapshots,
     stage,
@@ -507,7 +529,10 @@ async function buildInner(ctx: CliContext, session: BackendSession, rec: Recorde
   // Success: record the manifest and the source map of every touched asset. The manifest keeps what is on the stage (nodes, hashes)
   // but takes the IR hash of the applied units and the class defaults hash only after Unreal's compile passed: until then the
   // applied units count as changed, so a failed compile is repeated (and reported) by the next build instead of passing as up to date.
+  const tRecord = performance.now();
+  let readBack = 0;
   const finals: Manifest[] = [];
+  const badOverrides: Diagnostic[] = [];
   const stagedUnits: string[] = [];
   const appliedAssets: string[] = [];
   const createdStructs: string[] = [];
@@ -531,7 +556,30 @@ async function buildInner(ctx: CliContext, session: BackendSession, rec: Recorde
     const irAsset = irByPath.get(a.asset)!;
     if (outcome.tagWarning) output.diag(outcome.tagWarning);
     for (const d of outcome.defaultsWarnings) output.diag(d);
-    const nodes = parseExport(outcome.finalText ?? (await readAsset(ctx, backend, a.asset)).text).nodes;
+    // The final export is only needed for the asset's applied units (the override check and their fingerprints). An asset that only
+    // got class defaults, variable defaults or removals has none: it is not read back from the editor (one editor read per asset, about
+    // 30 s on a big mod, was most of a build that re-applied the defaults of every asset).
+    const nodes: Map<string, T3dNode> =
+      a.units.length === 0 ? new Map() : parseExport(outcome.finalText ?? (readBack++, await readAsset(ctx, backend, a.asset)).text).nodes;
+    // An @override must come out as an override event. An event Unreal could not resolve while the backend templated it (a backend
+    // without the Blueprint-class override fix templates against an Actor scratch) is turned into a custom event named like the
+    // parent's function (GunStartFiring_1): it compiles clean but is never called, so the parent's code keeps running.
+    for (const p of a.units) {
+      if (p.unit.kind !== "override") continue;
+      const entry = p.unit.nodes.find((n) => n.sem?.k === "override");
+      const real = entry === undefined ? undefined : outcome.nodeIds[nodeKey(p.unit, entry.id)];
+      const node = real === undefined ? undefined : nodes.get(t3dNodeKey(p.unit.graph, real));
+      if (node === undefined || node.head.includes("bOverrideFunction=True")) continue;
+      const custom = node.head.map((h) => /^CustomFunctionName="([^"]+)"/.exec(h)?.[1]).find((x) => x !== undefined);
+      badOverrides.push({
+        severity: "error",
+        code: "ABFC6003",
+        asset: a.asset,
+        span: p.unit.origin,
+        message: `@override ${p.unit.name} did not become an override event in ${a.asset.slice(a.asset.lastIndexOf("/") + 1)}${custom !== undefined ? `: Unreal made it the custom event ${custom}` : ""}, so the parent's ${p.unit.name} would still run and this code never would.`,
+        fix: "apply backend-override-blueprint-events.patch to abf-mod-editor-mcp (an event declared in a Blueprint class, such as a game weapon's GunStartFiring, needs it) and build again; until then call a custom @event from a hand-made override.",
+      });
+    }
 
     const old = manifests.get(a.asset) ?? null;
     // Units that left the TS are gone from the stage now (or were never there): drop them from the manifest. This is not held back
@@ -587,6 +635,12 @@ async function buildInner(ctx: CliContext, session: BackendSession, rec: Recorde
       const { default: _old, ...rest } = variables[at]!;
       variables[at] = def === null ? rest : { ...rest, default: def };
     }
+    // Own fields' defaults: in the stage of this sync when this build sent them all (after a re-sync), created the asset's fields,
+    // or they were already there; changed ones are not published any more.
+    const varsInStage = old === null || a.variablesResynced === true || (old.variablesStageSyncedAt ?? null) === stage.syncedAt;
+    const variablesStageSyncedAt = varsInStage ? stage.syncedAt : old?.variablesStageSyncedAt;
+    const varsChanged = a.variables.length > 0 || Object.keys(a.variableDefaults ?? {}).length > 0;
+    const variablesPublished = !varsChanged && old?.variablesPublished === true;
     // Class defaults: the hash is recorded only when pass 5 succeeded, so a failed pass is repeated by the next build.
     const defaultsDone = a.defaults !== undefined && outcome.defaultsApplied;
     const classDefaultsHash = defaultsDone ? a.defaults!.hash : old?.classDefaultsHash;
@@ -625,6 +679,8 @@ async function buildInner(ctx: CliContext, session: BackendSession, rec: Recorde
       variables,
       ...(classDefaultsHash !== undefined ? { classDefaultsHash } : {}),
       ...(classDefaultsStageSyncedAt !== undefined ? { classDefaultsStageSyncedAt } : {}),
+      ...(variablesStageSyncedAt !== undefined ? { variablesStageSyncedAt } : {}),
+      ...(variablesPublished ? { variablesPublished: true as const } : {}),
       // Kept only when this build planned no defaults pass; a planned pass that did not succeed clears it (the next build must apply the defaults).
       ...(a.defaults === undefined && old?.classDefaultsPublished === true ? { classDefaultsPublished: true as const } : {}),
       ...(directorRow !== undefined ? { directorRow } : {}),
@@ -643,6 +699,7 @@ async function buildInner(ctx: CliContext, session: BackendSession, rec: Recorde
       units: units.map((u) => (appliedIds.has(u.id) ? { ...u, irHash: "" } : u)),
       ...(old?.classDefaultsHash !== undefined ? { classDefaultsHash: old.classDefaultsHash } : {}),
       ...(old?.classDefaultsStageSyncedAt !== undefined ? { classDefaultsStageSyncedAt: old.classDefaultsStageSyncedAt } : {}),
+      ...(old?.variablesStageSyncedAt !== undefined ? { variablesStageSyncedAt: old.variablesStageSyncedAt } : {}),
       ...(old?.directorRow !== undefined ? { directorRow: old.directorRow } : {}),
       ...(retiredUnpublished.length > 0 ? { retiredUnpublished } : {}),
       ...(source !== undefined ? { source } : {}),
@@ -655,6 +712,9 @@ async function buildInner(ctx: CliContext, session: BackendSession, rec: Recorde
     writeSourceMap(projectDir, sourceMapOf(irAsset, { ...previousNames(old), ...outcome.nodeIds }));
     appliedAssets.push(a.asset);
   }
+
+  // Recording the applied assets (with the editor reads of assets whose apply returned no export) gets its own line in runs.jsonl.
+  rec.record("build.record", since(tRecord), true, readBack);
 
   // Unreal's own compile of the changed assets.
   const tCompile = performance.now();
@@ -679,7 +739,9 @@ async function buildInner(ctx: CliContext, session: BackendSession, rec: Recorde
           },
         )
       : ({ clean: true, messages: [] } as unknown as CompileReport);
-  const compileOk = compileClean(report);
+  for (const d of badOverrides) output.diag(d);
+  // A lost override fails the build like a compile error: the stage is re-synced so the stray custom event is not published.
+  const compileOk = compileClean(report) && badOverrides.length === 0;
   rec.record("build.compile", since(tCompile), compileOk);
   if (!compileOk) {
     for (const asset of appliedAssets) {

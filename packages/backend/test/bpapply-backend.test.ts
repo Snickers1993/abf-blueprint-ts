@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AbfcError } from "@abfc/env";
 import { BpApplyBackend, McpStdioClient, grantPublish, publishResultFrom } from "../src/index.js";
+import { auditTimeoutSeconds } from "../src/bpapply-backend.js";
 
 const FIXTURE = fileURLToPath(new URL("../../test/fixtures/fake-bpapply-server.mjs", import.meta.url));
 
@@ -514,4 +515,11 @@ test("publishResultFrom maps bp_publish results", () => {
   assert.deepEqual(a.skippedDirty, []);
   assert.deepEqual(a.dirtyPublished, []);
   assert.deepEqual(a.compileErrorsAfter, []);
+});
+
+test("the mod audit gets 1800 s by default; ABFC_AUDIT_TIMEOUT_SECONDS overrides it (60 s or more)", () => {
+  assert.equal(auditTimeoutSeconds({}), 1800);
+  assert.equal(auditTimeoutSeconds({ ABFC_AUDIT_TIMEOUT_SECONDS: "3600" }), 3600);
+  assert.equal(auditTimeoutSeconds({ ABFC_AUDIT_TIMEOUT_SECONDS: "5" }), 1800);
+  assert.equal(auditTimeoutSeconds({ ABFC_AUDIT_TIMEOUT_SECONDS: "soon" }), 1800);
 });
