@@ -62,7 +62,7 @@ const temps = (ir: IrModule): string[] => ir.assets.flatMap((a) => a.variables.f
 const nodesOf = (ir: IrModule): IrNode[] => ir.assets.flatMap((a) => a.units.flatMap((u) => u.nodes));
 const wiresOf = (ir: IrModule): Array<[string, string]> => ir.assets.flatMap((a) => a.units.flatMap((u) => u.wires as Array<[string, string]>));
 
-// The RTS capsule flow bug: `const first = this.Pts.length` was a live Array Length node, read again after the pushes.
+// A route parser bug: `const first = this.Pts.length` was a live Array Length node, read again after the pushes.
 test("a const that reads an array length is stored before a later push changes it", () => {
   const ir = irOf("    const first = this.Names.length;\n    this.Names.push(nameOf(\"Slot\"));\n    this.Count = this.Names.length - first;");
   assert.deepEqual(temps(ir), ["abfc_Go_t0:int"]);
