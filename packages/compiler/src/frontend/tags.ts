@@ -89,15 +89,6 @@ export function functionInfo(sym: ts.Symbol): FunctionInfo | undefined {
       // malformed tag: ignore
     }
   }
-  const params = (tags.get("bpParam") ?? []).map((t, i) => {
-    const { head, rest } = firstWord(t);
-    const d = defaults.get(head);
-    return { tsName: tsNames[i] ?? head, pin: head, type: rest, ...(d === undefined ? {} : { default: d }) };
-  });
-  const outs = (tags.get("bpOut") ?? []).map((t) => {
-    const { head, rest } = firstWord(t);
-    return { pin: head, type: rest };
-  });
   const pinOfTs = new Map<string, string>();
   for (const t of tags.get("bpPin") ?? []) {
     const { head, rest } = firstWord(t);
@@ -107,6 +98,19 @@ export function functionInfo(sym: ts.Symbol): FunctionInfo | undefined {
       // malformed tag: ignore
     }
   }
+  // A pin name with spaces ("Source Inventories") is written whole in `@bpParam`, so its first word is not the name:
+  // take the longest spaced `@bpPin` name the tag starts with. Names without spaces are read as before.
+  const spacedPins = [...pinOfTs.values()].filter((p) => /\s/.test(p)).sort((a, b) => b.length - a.length);
+  const params = (tags.get("bpParam") ?? []).map((t, i) => {
+    const spaced = spacedPins.find((p) => t.startsWith(p + " "));
+    const { head, rest } = spaced === undefined ? firstWord(t) : { head: spaced, rest: t.slice(spaced.length + 1).trim() };
+    const d = defaults.get(head);
+    return { tsName: tsNames[i] ?? head, pin: head, type: rest, ...(d === undefined ? {} : { default: d }) };
+  });
+  const outs = (tags.get("bpOut") ?? []).map((t) => {
+    const { head, rest } = firstWord(t);
+    return { pin: head, type: rest };
+  });
   const exec = tags.get("bpExecOutputs")?.[0];
   const isStatic =
     decl !== undefined &&
