@@ -1295,7 +1295,8 @@ test("(S40b) with staging_refresh a change to a file abfc does not own copies ju
     x = await r.run(["build"]);
     assert.equal(x.code, 0, x.out);
     assert.doesNotMatch(x.out, /ABFC4017/, x.out);
-    assert.match(x.out, /copied 2 file\(s\) into the staged copy/, x.out);
+    assert.match(x.out, /Mod Editor saved 2 file\(s\) abfc does not build .*copied 2 file\(s\) into the staged copy/, x.out);
+    assert.doesNotMatch(x.out, /changed since the staged copy was made/, x.out);
     assert.equal(count("staging_refresh"), 1);
     assert.equal(count("staging_sync"), syncs, "no full re-sync");
     assert.equal(count("bp_read"), reads, "nothing is read from the editor");

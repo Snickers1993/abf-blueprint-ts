@@ -1,9 +1,20 @@
 import type { Backend, StageStatus } from "@abfc/backend";
+import { listManifests } from "@abfc/compiler";
 import { AbfcError } from "@abfc/env";
 import type { Environment, ProjectConfig } from "@abfc/env";
 import type { Diagnostic } from "@abfc/ir";
 import { SLOW_BACKEND_HINT } from "../progress.js";
 import type { Progress } from "../progress.js";
+
+/** The packages (lowercase) whose files changing in the mod need the full re-sync: every asset of a manifest and its old name, plus `extra`. */
+export function abfcPackages(projectDir: string, extra: Iterable<string> = []): Set<string> {
+  const out = new Set([...extra].map((a) => a.toLowerCase()));
+  for (const m of listManifests(projectDir)) {
+    out.add(m.asset.toLowerCase());
+    if (m.renamedFrom !== undefined) out.add(m.renamedFrom.toLowerCase());
+  }
+  return out;
+}
 
 /**
  * Makes sure the mod has a staged copy and returns its status. `resync` discards the stage and copies the real mod again;
@@ -103,7 +114,7 @@ export async function ensureStage(
         if (fresh === null) throw new AbfcError({ severity: "error", code: "ABFC4002", message: `staging_refresh for ${mod} finished but staging_status reports no stage.` });
         status = fresh;
         const n = r.copied.length + r.removed.length;
-        o.note?.(`the real mod changed since the staged copy was made (${listed}): copied ${n} file(s) into the staged copy, the rest is kept`);
+        o.note?.(`the Mod Editor saved ${n} file(s) abfc does not build (${listed}): copied ${n} file(s) into the staged copy, the rest is kept (no re-sync)`);
         return { status, resynced: false, changedInMod: [], refreshed: [...r.copied, ...r.removed] };
       } else {
         // The stage only holds abfc's own work, which the same build regenerates from the TypeScript: copy the mod again and go on.

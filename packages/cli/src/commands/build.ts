@@ -48,7 +48,7 @@ import {
 } from "./common.js";
 import { refreshTagsFile } from "../tags.js";
 import { deleteRetiredRows, runAssetOps, runParentChange } from "./assetops.js";
-import { ensureStage } from "./stage.js";
+import { abfcPackages, ensureStage } from "./stage.js";
 import { ensureStubsForBuild, ensureUsedStubsForBuild } from "./generate.js";
 
 /** True for an @event whose doc comment is its tooltip: the backend only writes it with the bp_apply feature `event_meta`. */
@@ -194,11 +194,7 @@ async function buildInner(ctx: CliContext, session: BackendSession, rec: Recorde
 
   const tStage = performance.now();
   // Files of these assets changed in the mod need the full re-sync (their nodes and manifests); any other change is copied alone.
-  const abfcAssets = new Set([...owned, ...structAssets].map((a) => a.path.toLowerCase()));
-  for (const m of listManifests(projectDir)) {
-    abfcAssets.add(m.asset.toLowerCase());
-    if (m.renamedFrom !== undefined) abfcAssets.add(m.renamedFrom.toLowerCase());
-  }
+  const abfcAssets = abfcPackages(projectDir, [...owned, ...structAssets].map((a) => a.path));
   const { status: stage, resynced, changedInMod } = await ensureStage(backend, env, config, {
     resync: args.flags.resync,
     warn: (d) => output.diag(d),
