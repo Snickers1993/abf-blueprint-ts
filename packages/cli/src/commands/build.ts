@@ -193,10 +193,17 @@ async function buildInner(ctx: CliContext, session: BackendSession, rec: Recorde
   if (emitAll(ctx, opsPlan.diagnostics)) return FAILED_BUILD;
 
   const tStage = performance.now();
+  // Files of these assets changed in the mod need the full re-sync (their nodes and manifests); any other change is copied alone.
+  const abfcAssets = new Set([...owned, ...structAssets].map((a) => a.path.toLowerCase()));
+  for (const m of listManifests(projectDir)) {
+    abfcAssets.add(m.asset.toLowerCase());
+    if (m.renamedFrom !== undefined) abfcAssets.add(m.renamedFrom.toLowerCase());
+  }
   const { status: stage, resynced, changedInMod } = await ensureStage(backend, env, config, {
     resync: args.flags.resync,
     warn: (d) => output.diag(d),
     progress: ctx.progress,
+    ...(caps.stageRefresh ? { refreshUnless: abfcAssets, note: (line: string) => output.info(line, "dim") } : {}),
   });
   // Reads of assets whose stage files (and referenced mod files) are byte-identical to an earlier read come from .abfc/cache/reads,
   // not the editor: after a re-sync that is every asset nobody saved. `--full` (build and publish) reads everything from the editor.

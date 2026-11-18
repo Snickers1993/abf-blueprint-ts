@@ -90,7 +90,7 @@ test("bp_publish and tools off the allowlist are refused before any message is s
 
 test("assertToolAllowed accepts exactly the allowlist", () => {
   for (const t of ALLOWED_TOOLS) assert.doesNotThrow(() => assertToolAllowed(t));
-  assert.equal(ALLOWED_TOOLS.length, 13);
+  assert.equal(ALLOWED_TOOLS.length, 14);
   assert.throws(() => assertToolAllowed("bp_publish"), AbfcError);
   assert.throws(() => assertToolAllowed("run_python"), AbfcError);
 });

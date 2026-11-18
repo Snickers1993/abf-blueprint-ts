@@ -1,0 +1,37 @@
+diff --git a/editor/bpkit/apply.py b/editor/bpkit/apply.py
+index ae016fb..237d744 100644
+--- a/editor/bpkit/apply.py
++++ b/editor/bpkit/apply.py
+@@ -101,7 +101,9 @@ def _self_events(scopes):
+ def _fn_nodes(f, parent=None, editable=True, access=None):
+     ins, outs = f.get("inputs") or [], f.get("outputs") or []
+     # an override's entry carries the parent function's access specifier (`access`), else the editor refuses the compile
+-    flags = t3d.fn_flags(f.get("access")) if parent is None else (t3d.fn_flags(access) if access else t3d.FLAGS_FN)
++    # Without one it carries no access bits at all: the compiler ORs the parent's in and then compares, so any bit the parent
++    # lacks fails ("Access specifier is not compatible the parent function"), and none always matches.
++    flags = t3d.fn_flags(f.get("access")) if parent is None else (t3d.fn_flags(access) if access else (t3d.FLAGS_FN & ~t3d.ACCESS_MASK))
+     nodes = [t3d.entry_node(f["name"], ins, flags=flags, parent=parent, editable=editable)]
+     if outs:
+         nodes.append(t3d.result_node(f["name"], outs, parent=parent))
+@@ -200,9 +202,9 @@ def apply_asset(spec, mod, index=0):
+         if f.get("override"):
+             # an override of a parent function with outputs: entry and result name the parent; the graph joins FunctionGraphs
+             ptext = env.class_text(f["override"])
+-            # the spec's own access wins (override_access); else what the parent function has; else public as before
+-            acc = f.get("override_access") or assets.parent_fn_access(_iface_path(ptext), f["name"])
+-            report.setdefault("override_access", {})[f["name"]] = acc
++            # the spec's own access (override_access) is written as given; else the entry has no access bits and inherits the parent's
++            acc = f.get("override_access")
++            report.setdefault("override_access", {})[f["name"]] = {"sent": acc, "parent": assets.parent_fn_access(_iface_path(ptext), f["name"])}
+             defs = [n.defn() for n in _fn_nodes(f, parent=ptext, editable=False, access=acc)]
+             assets.add_function_override(bp, f["name"], defs)
+             continue
+@@ -301,7 +303,7 @@ def apply_asset(spec, mod, index=0):
+         defs_text, names = "", []
+         already = assets.implements_interface(bp, ipath)
+         for f in it.get("functions") or []:
+-            defs = [n.defn() for n in _fn_nodes(f, parent=icls, editable=False)]
++            defs = [n.defn() for n in _fn_nodes(f, parent=icls, editable=False, access="public")]
+             if already:
+                 g = assets.find_any_graph(bp, f["name"])
+                 if g is None:

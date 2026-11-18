@@ -1,0 +1,57 @@
+diff --git a/editor/bpkit/apply.py b/editor/bpkit/apply.py
+index ef0131b..5fae4c0 100644
+--- a/editor/bpkit/apply.py
++++ b/editor/bpkit/apply.py
+@@ -188,6 +188,11 @@ def apply_asset(spec, mod, index=0):
+     for f in spec.get("functions") or []:
+         if LIB.find_graph(bp, f["name"]):
+             raise RuntimeError("function graph %s already exists; list it in remove_functions to replace it" % f["name"])
++        if f.get("override"):
++            # an override of a parent function with outputs: entry and result name the parent; the graph joins FunctionGraphs
++            defs = [n.defn() for n in _fn_nodes(f, parent=env.class_text(f["override"]), editable=False)]
++            assets.add_function_override(bp, f["name"], defs)
++            continue
+         g = must(LIB.add_function_graph(bp, f["name"]), "new function graph " + f["name"])
+         if g.get_name() != f["name"]:
+             raise RuntimeError("function graph %s was created as %s (the name is still in use)" % (f["name"], g.get_name()))
+diff --git a/editor/bpkit/assets.py b/editor/bpkit/assets.py
+index 3971d76..80fb6eb 100644
+--- a/editor/bpkit/assets.py
++++ b/editor/bpkit/assets.py
+@@ -174,6 +174,14 @@ def add_macro(bp, name, defs, guid):
+     return core.adopt_graphs(ib, [name], bp)
+ 
+ 
++def add_function_override(bp, name, defs):
++    """Append a function graph that overrides the parent's function `name` (its entry and result carry MemberParent)."""
++    elem = "\"/Script/Engine.EdGraph'BkG0'\""
++    off = core.bp_arr_off(bp, "FunctionGraphs", elem, '      Begin Object Class=/Script/Engine.EdGraph Name="BkG0"\n      End Object\n')
++    ib = core.array_append(bp, "FunctionGraphs", off, t3d.graph_obj(name, defs), ["\"/Script/Engine.EdGraph'%s'\"" % name])
++    return core.adopt_graphs(ib, [name], bp)
++
++
+ def add_interface(bp, iface_class, graphs_text, names):
+     """Append an ImplementedInterfaces entry (FBPInterfaceDescription: 8 + 16 bytes) keeping the existing ones."""
+     ie = "(Interface=\"/Script/Engine.BlueprintGeneratedClass'%s'\")" % iface_class
+diff --git a/editor/bpkit/specs.py b/editor/bpkit/specs.py
+index 118ed32..536db61 100644
+--- a/editor/bpkit/specs.py
++++ b/editor/bpkit/specs.py
+@@ -128,7 +128,7 @@ REQUIRED = {
+ CREATE_CLASSES = ("Blueprint", "WidgetBlueprint", "BlueprintInterface", "UserDefinedStruct")
+ RAW_KINDS = ("graph", "tree", "tree_replace", "python")
+ # bp_apply features reported by the backend_info tool
+-FEATURES = ("cast_object_pin", "class_manager_row", "class_manager_row_tag", "event_meta", "function_graphs", "map_types", "pin_types", "self_event_calls",
++FEATURES = ("cast_object_pin", "class_manager_row", "class_manager_row_tag", "event_meta", "function_graphs", "map_types", "override_functions", "pin_types", "self_event_calls",
+             "set_types", "struct_fields", "variable_defaults")
+ EVENT_META_KEYS = ("tooltip", "category", "keywords")
+ EVENT_META_MAX = 2000
+@@ -501,6 +501,8 @@ def validate(batch, mod):
+             seen_fns.add(f["name"])
+             if "access" in f and f["access"] not in ("public", "protected", "private"):
+                 problems.append("%s.access must be public, protected or private" % fw)
++            if "override" in f and (not isinstance(f["override"], str) or not f["override"].startswith("/")):
++                problems.append(fw + ".override must be the class path of the parent that declares the function")
+             if f.get("pure"):
+                 problems.append(fw + ": pure functions are not supported (the engine rejects the generated pure function; make it an ordinary function)")
+             _check_params(problems, fw + ".inputs", f.get("inputs") or [])

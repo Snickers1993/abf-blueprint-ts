@@ -130,6 +130,8 @@ export interface FakeBackendOptions {
   handMadeEvent?: boolean;
   /** `staging_sync` with discardChanges (a resync) fails; the first sync of a missing stage still works (default false). */
   failResync?: boolean;
+  /** The backend has the `staging_refresh` tool (the local backend-staging-refresh patch; default false). */
+  stageRefresh?: boolean;
   /** Further Blueprint assets (paths) the mod holds from the start, empty: they are in the stage after every resync. */
   emptyAssets?: string[];
   /** `backend_info` reports the stageAudit capability (default false: mod_audit audits the real mod). */
@@ -481,6 +483,7 @@ export class FakeBackend implements Backend {
     const capabilities = capabilitiesFrom(tools, withInfo ? (fixInfo() as RawBackendInfo) : null, { features: EXT_FEATURES });
     capabilities.stdMacros = o.stdMacros ?? capabilities.stdMacros;
     capabilities.stageAudit = o.stageAudit === true;
+    capabilities.stageRefresh = o.stageRefresh === true;
     capabilities.selfEventCalls = o.selfEventCalls !== false || o.advertiseSelfEventCalls === true;
     capabilities.eventMeta = o.eventMeta === true;
     capabilities.classManagerRows = o.classManagerRows === true;
@@ -722,6 +725,15 @@ export class FakeBackend implements Backend {
     this.syncs++;
     this.mirrorFiles();
     return { mod: "TestMod", files: this.assets.size, stagingPath: join(this.root, "stage") };
+  }
+
+  /** `staging_refresh`: only the stale files come over from the real mod; the staged assets and edits stay. */
+  async refreshStage(_mod: string): Promise<{ copied: string[]; removed: string[] }> {
+    this.calls.push({ tool: "staging_refresh" });
+    const copied = [...this.stageStale];
+    this.stageStale = [];
+    this.mirrorFiles(); // synced_at stays: the stage was not made again
+    return { copied, removed: [] };
   }
 
   async stageStatus(mod: string): Promise<StageStatus | null> {

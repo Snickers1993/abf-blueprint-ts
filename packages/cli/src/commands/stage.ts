@@ -18,8 +18,20 @@ export async function ensureStage(
   backend: Backend,
   env: Environment,
   config: ProjectConfig,
-  o: { resync: boolean; onConflict?: "resync" | "report"; warn?: (d: Diagnostic) => void; progress?: Progress | undefined },
-): Promise<{ status: StageStatus; resynced: boolean; changedInMod: string[] }> {
+  o: {
+    resync: boolean;
+    onConflict?: "resync" | "report";
+    warn?: (d: Diagnostic) => void;
+    progress?: Progress | undefined;
+    /**
+     * The assets abfc builds (lowercase package paths). When the real mod changed only files the stage never touched and none of
+     * them belongs to one of these, a backend with `staging_refresh` copies just those files and the stage keeps everything else
+     * (no ABFC4017, nothing to prune or read again); `note` says what it copied.
+     */
+    refreshUnless?: ReadonlySet<string>;
+    note?: (line: string) => void;
+  },
+): Promise<{ status: StageStatus; resynced: boolean; changedInMod: string[]; refreshed?: string[] }> {
   const mod = config.mod.name;
   const modDir = env.modDir.value;
   const stageFrom = async (discardChanges: boolean): Promise<StageStatus> => {
@@ -43,7 +55,12 @@ export async function ensureStage(
     return status;
   };
 
-  const body = async (): Promise<{ status: StageStatus; resynced: boolean; changedInMod: string[] }> => {
+  /** The package of a staged file (`Content/Rooms/BP_X.uasset` -> `/<mod>/rooms/bp_x`, lowercase), null outside Content. */
+  const packageOf = (rel: string): string | null => {
+    const m = /^Content\/(.+)\.[^./]+$/i.exec(rel.replace(/\\/g, "/"));
+    return m === null ? null : `/${mod}/${m[1]!}`.toLowerCase();
+  };
+  const body = async (): Promise<{ status: StageStatus; resynced: boolean; changedInMod: string[]; refreshed?: string[] }> => {
     let status: StageStatus | null;
     let resynced = false;
     if (o.resync) {
@@ -70,6 +87,24 @@ export async function ensureStage(
           code: "ABFC4020",
           message: `the real mod ${mod} changed since the staged copy was made (${listed}); the next abfc build copies the mod again and applies the TypeScript on top (TypeScript wins).`,
         });
+      } else if (
+        o.refreshUnless !== undefined &&
+        backend.refreshStage !== undefined &&
+        status.conflicts.length === 0 &&
+        !status.stale.some((rel) => {
+          const pkg = packageOf(rel);
+          return pkg !== null && o.refreshUnless!.has(pkg);
+        })
+      ) {
+        // Only files nothing of abfc's lives in changed (a room bake, a material saved, a mesh reimported): copy just those into the
+        // stage. Everything else stays as it was, unpublished work included, so nothing is pruned or read again.
+        const r = await backend.refreshStage(mod);
+        const fresh = await backend.stageStatus(mod);
+        if (fresh === null) throw new AbfcError({ severity: "error", code: "ABFC4002", message: `staging_refresh for ${mod} finished but staging_status reports no stage.` });
+        status = fresh;
+        const n = r.copied.length + r.removed.length;
+        o.note?.(`the real mod changed since the staged copy was made (${listed}): copied ${n} file(s) into the staged copy, the rest is kept`);
+        return { status, resynced: false, changedInMod: [], refreshed: [...r.copied, ...r.removed] };
       } else {
         // The stage only holds abfc's own work, which the same build regenerates from the TypeScript: copy the mod again and go on.
         status = await stageFrom(true);

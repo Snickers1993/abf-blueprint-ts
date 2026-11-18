@@ -74,6 +74,7 @@ export const BP_APPLY_P1_BASE: BackendCapabilities = {
   publish: false,
   warmSession: false,
   stageAudit: false,
+  stageRefresh: false,
   pinTypes: false,
   stdMacros: false,
   castObjectPin: false,
@@ -172,5 +173,6 @@ export function capabilitiesFrom(
       bool(info?.capabilities?.compileErrorNodeRefs) || (ext?.features?.includes("compile_node_refs") ?? false),
     warmSession: bool(info?.capabilities?.warmSession) && tools.includes("warm_session"),
     stageAudit: bool(info?.capabilities?.stageAudit),
+    stageRefresh: tools.includes("staging_refresh"),
   };
 }
