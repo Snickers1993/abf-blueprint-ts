@@ -1,12 +1,12 @@
 # Local patches to the backend
 
-abfc talks to EmekC's [abf-mod-editor-mcp](https://github.com/EmekC/abf-mod-editor-mcp) (see [../backend.md](../backend.md)). These patches add features abfc uses that the upstream backend does not have yet. They are kept here so they are versioned with the abfc code that needs them; each one is plain `git diff` output against the backend repository.
+abfc talks to EmekC's [abf-mod-editor-mcp](https://github.com/EmekC/abf-mod-editor-mcp) (see [../backend.md](../backend.md)). These patches add features abfc uses (or that make the editor side safer) that the upstream backend does not have yet. They are kept here so they are versioned with the abfc code that needs them; each one is plain `git diff` output against the backend repository.
 
 Every patch is optional. abfc checks the backend's tool list and `backend_info`, and without a patch it falls back to the old behaviour (usually with a warning).
 
 ## Apply order
 
-All eight apply cleanly, in this order, on upstream commit `4e77497`:
+All nine apply cleanly, in this order, on upstream commit `4e77497`:
 
 | # | Patch | What it adds |
 | --- | --- | --- |
@@ -18,6 +18,7 @@ All eight apply cleanly, in this order, on upstream commit `4e77497`:
 | 6 | `backend-override-access.patch` | an override entry carries the parent function's access specifier, else the editor refuses the compile |
 | 7 | `backend-override-no-access-bits.patch` | refines 6: without an explicit access the override entry has no access bits and inherits the parent's |
 | 8 | `backend-staging-refresh.patch` | tool `staging_refresh`: copies only the files the real mod changed into the stage and keeps the rest (no full re-sync when only files abfc does not build were saved) |
+| 9 | `backend-raw-memory-guards.patch` | crash guard for the editor-side raw memory scans: a number that only looks like a pointer is checked with `VirtualQuery` before it is read (an unchecked read is an access violation that kills the editor), and the array-offset probes use a second count to rule out stray matches |
 
 ## Applying
 
