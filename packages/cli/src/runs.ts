@@ -9,6 +9,8 @@ export interface RunEntry {
   ok: boolean;
   units?: number;
   mode: "warm" | "cold";
+  /** The asset of a per-asset step (`read.editor`). */
+  asset?: string;
 }
 
 /** Appends one JSON line to the runs file (`.abfc/runs.jsonl`), creating the folder when needed. */

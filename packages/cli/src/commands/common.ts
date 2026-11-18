@@ -209,10 +209,32 @@ export async function readAsset(ctx: CliContext, backend: Backend, asset: string
     const hit = cache.get(key);
     if (hit !== null) return { text: hit, parsed: parseExport(hit) };
   }
+  // An editor read takes tens of seconds on a large mod: each one is shown and timed in runs.jsonl (`read.editor`, `asset`) as it ends,
+  // so a long run of reads after a re-sync is not silent.
+  const t0 = performance.now();
+  const miss = cache?.missed.at(-1);
   const snap = await backend.read(ctx.config.mod.name, asset);
   const text = ctx.deps.host.readFile(snap.exportPath);
   if (cache !== undefined && key !== null) cache.put(key, text);
+  const seconds = (performance.now() - t0) / 1000;
+  const prefix = `/${ctx.config.mod.name}/`;
+  const shortOf = (p: string): string => (p.toLowerCase().startsWith(prefix.toLowerCase()) ? p.slice(prefix.length) : p);
+  const why = miss === undefined || miss.asset !== asset ? "" : miss.reason === "dep" && miss.dep !== undefined ? ` (${shortOf(miss.dep)} changed)` : ` (${missLabel(miss.reason)})`;
+  editorReads.set(ctx, (editorReads.get(ctx) ?? 0) + 1);
+  ctx.output.info(`  read ${shortOf(asset)} from the editor in ${seconds.toFixed(1)} s${why} [${editorReads.get(ctx)}]`, "dim");
+  try {
+    recordRun(ctx.paths.runsFile, { at: new Date().toISOString(), step: "read.editor", seconds, ok: true, mode: "cold", asset });
+  } catch {
+    // timings only
+  }
   return { text, parsed: parseExport(text) };
+}
+
+/** Editor reads of this run, for the running count on each read line. */
+const editorReads = new WeakMap<CliContext, number>();
+
+function missLabel(reason: string): string {
+  return reason === "files" ? "own files changed" : reason === "new" ? "not read before" : reason === "backend" ? "read with another backend before" : reason === "text" ? "cached text gone" : "no cache";
 }
 
 export const shortHash = (h: string | null): string => (h === null || h === "" ? "-" : h.replace(/^sha256:/, "").slice(0, 8));
@@ -255,9 +277,15 @@ export function readCacheFor(ctx: CliContext, info: BackendInfo, stagingPath: st
   if (stagingPath === "") return null;
   const profile = ctx.env.profile;
   const base = { server: info.serverVersion, engine: info.engineVersion, ext: info.extensions, caps: info.capabilities };
-  return new ReadCache(ctx.paths.cacheDir, stagingPath, ctx.config.mod.name, readCacheIdentity({ ...base, profile: profile.id }), [
-    readCacheIdentity({ ...base, stubs: stubLockHashOf(readLock(win32.join(ctx.paths.stubsDir, profile.id))), profile: profile.id }),
-  ]);
+  const classOnly = new Set((ctx.config.stubs.classOnly ?? []).map((a) => a.toLowerCase()));
+  return new ReadCache(
+    ctx.paths.cacheDir,
+    stagingPath,
+    ctx.config.mod.name,
+    readCacheIdentity({ ...base, profile: profile.id }),
+    [readCacheIdentity({ ...base, stubs: stubLockHashOf(readLock(win32.join(ctx.paths.stubsDir, profile.id))), profile: profile.id })],
+    classOnly,
+  );
 }
 
 /**
