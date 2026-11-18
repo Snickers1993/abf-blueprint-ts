@@ -6,6 +6,7 @@ import {
   listManifests,
   lowerChecked,
   mapCompileMessages,
+  orderCompileDiagnostics,
   featureGates,
   planAssetOps,
   planBuild,
@@ -499,6 +500,7 @@ async function buildInner(ctx: CliContext, session: BackendSession, rec: Recorde
   const irByPath = new Map(owned.map((a) => [a.path, a]));
   if (!applied.ok) {
     let reported = 0;
+    const mapped: Diagnostic[] = [];
     planned.plan.assets.forEach((a, i) => {
       const outcome = applied.perAsset[i];
       const irAsset = irByPath.get(a.asset);
@@ -510,11 +512,12 @@ async function buildInner(ctx: CliContext, session: BackendSession, rec: Recorde
         return;
       }
       if (outcome === undefined || irAsset === undefined) return;
-      for (const d of errorDiagnostics(a, irAsset, outcome)) {
-        output.diag(d);
-        reported++;
-      }
+      mapped.push(...errorDiagnostics(a, irAsset, outcome));
     });
+    for (const d of orderCompileDiagnostics(mapped)) {
+      output.diag(d);
+      reported++;
+    }
     if (reported === 0) {
       output.diag({
         severity: "error",
@@ -744,6 +747,7 @@ async function buildInner(ctx: CliContext, session: BackendSession, rec: Recorde
   const compileOk = compileClean(report) && badOverrides.length === 0;
   rec.record("build.compile", since(tCompile), compileOk);
   if (!compileOk) {
+    const mapped: Diagnostic[] = [];
     for (const asset of appliedAssets) {
       const sm = readSourceMap(projectDir, asset);
       if (sm === null) continue;
@@ -754,8 +758,9 @@ async function buildInner(ctx: CliContext, session: BackendSession, rec: Recorde
       }
       const irAsset = ir.assets.find((a) => a.path === asset);
       const { specIds, ownCalls } = irAsset ? callMaps(irAsset) : { specIds: {}, ownCalls: {} };
-      for (const d of mapCompileMessages(asset, messages, sm, names, specIds, ownCalls)) output.diag(d);
+      mapped.push(...mapCompileMessages(asset, messages, sm, names, specIds, ownCalls));
     }
+    for (const d of orderCompileDiagnostics(mapped)) output.diag(d);
     if (!hasError(output.diagnostics)) {
       output.diag({ severity: "error", code: "ABFC6002", message: "[Unreal] the compile report lists errors that could not be mapped." });
     }

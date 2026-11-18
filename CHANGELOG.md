@@ -60,6 +60,7 @@ abfc uses semantic versioning for its command-line surface: the commands, their 
 
 ### Changed
 
+- A failed Unreal compile prints the errors that caused it first. Unreal compiles the applied Blueprints together, so one function that fails leaves it missing for every caller, and each call in every class reported `Could not find a function named "X"` (hundreds of lines in one build, hiding the real errors). When other errors exist, those echoes now follow them, folded into one error per missing function with the number of calls.
 - A `const` bound to a pure expression that reads state (an own variable, an array length or element, a member getter) is stored in a temp where it stands, so a use after a later write still sees the old value. It used to be a live pure node, re-read at every use: `const first = this.Pts.length` read the length after the pushes in a route parser and skipped every route. A const read only by the very next statement (or the next `if` condition) stays a plain pure value.
 - The mod audit (`publish --full` gate 5) gets 1800 s instead of 420 s; a mod of about 900 assets was killed after 7 minutes with no verdict. `ABFC_AUDIT_TIMEOUT_SECONDS` sets another limit (60 or more).
 - `abfc check` shows Blueprint filter hits (ABFC7011) as warnings. They were only reported at `publish --full` gate 2, so a check and a build passed and the publish gate failed.
@@ -77,6 +78,7 @@ abfc uses semantic versioning for its command-line surface: the commands, their 
 
 ### Fixed
 
+- An int, int64 or byte value where a float or double is expected (a call argument, an assignment, the other operand of real arithmetic) goes through KismetMathLibrary's `Conv_IntToDouble` (`Conv_Int64ToDouble`, `Conv_ByteToDouble`). TypeScript sees two numbers, so `const ang = this.Count * 90; M.DegCos(ang)` passed `abfc check`, but Unreal refused to link the int to the float pin ("Convert Integer to Float") and the function failed to compile. A double operand with an int one is no longer ABFC2012. Int literals and consts bound to one stay pin defaults.
 - A field default changed by a build that was never published came back as the mod's old value after the stage was copied from the mod again (ABFC4017 or `--resync`): the manifest already recorded the new default, so later builds saw no change and never set it again. The manifest now records which stage sync the defaults were applied to (`variablesStageSyncedAt`) and whether a publish carried them (`variablesPublished`); after a re-sync that discarded them, or a Mod Editor save of the asset, every own field's default is sent again. The first build with this version sends them once for every asset with field defaults.
 - Reading a variable or component that a parent class declares (`this.IsDepleted` in a child of a game Blueprint) names that class as the get's MemberParent, with a Self node as its Target; the self-context get had no pins in bp_apply's scratch Blueprint, so the apply failed with "no pin 'IsDepleted'".
 

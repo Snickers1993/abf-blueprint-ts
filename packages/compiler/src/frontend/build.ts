@@ -18,6 +18,13 @@ export { classPathOf } from "./tags.js";
 const USER_WIDGET = "/Script/UMG.UserWidget";
 const ACTOR_COMPONENT = "/Script/Engine.ActorComponent";
 const NUMERIC = new Set(["int", "int64", "byte", "float", "double", "real"]);
+const MATH_LIBRARY = "/Script/Engine.KismetMathLibrary";
+/** The KismetMathLibrary conversion of an integer value into a double, by the value's Blueprint type. */
+const INT_TO_REAL: Readonly<Record<string, { fn: string; pin: string }>> = {
+  int: { fn: "Conv_IntToDouble", pin: "InInt" },
+  int64: { fn: "Conv_Int64ToDouble", pin: "InInt" },
+  byte: { fn: "Conv_ByteToDouble", pin: "InByte" },
+};
 const STRINGY = new Set(["name", "text", "string"]);
 /** `@blueprint` options that set class defaults (applied by the class-defaults pass). */
 const CLASS_OPTIONS = new Set(["replicates", "alwaysRelevant", "onlyRelevantToOwner", "netUpdateFrequency", "minNetUpdateFrequency", "tickInterval", "tickEnabled", "kind"]);
@@ -256,6 +263,8 @@ class HirBuilder {
   private cls!: HirClass;
   private body!: ts.Node;
   private locals = new Map<ts.Symbol, LocalInfo>();
+  /** Consts bound to a literal: lowering feeds their text as a pin default, which a real pin takes from an int as it is. */
+  private literalLocals = new Set<LocalId>();
   private params = new Map<ts.Symbol, { name: string; type: BpType }>();
   private nextLocal = 0;
   /** Owned `@event`/`@override` methods of the class being built, by name. */
@@ -1255,6 +1264,7 @@ class HirBuilder {
     this.cls = cls;
     this.body = m.body!;
     this.locals = new Map();
+    this.literalLocals = new Set();
     this.params = new Map();
     this.holes = new Map();
     this.handled = new Set();
@@ -1380,6 +1390,7 @@ class HirBuilder {
     const id = this.nextLocal++;
     const fn = init.type === "result" ? this.callInfo.get(init) : undefined;
     if (sym) this.locals.set(sym, { id, name: d.name.text, type: init.type, poison: false, ...(fn ? { fn } : {}) });
+    if (init.k === "lit") this.literalLocals.add(id);
     const uses = sym ? this.countUses(sym, d.name) : 0;
     const nextOnly = sym !== undefined && uses > 0 && this.usesOnlyInNext(node, sym, d.name, uses);
     return { k: "const", local: id, name: d.name.text, init, uses, ...(nextOnly ? { nextOnly } : {}), span: this.sp(node) };
@@ -1848,7 +1859,35 @@ class HirBuilder {
     return { k: "lit", value, type, span: this.sp(node) };
   }
 
+  /**
+   * The value of `node` where `expected` is wanted. An int, int64 or byte value where a float or double is expected (a call argument,
+   * an assignment, the other operand of real arithmetic) goes through KismetMathLibrary's Conv_*ToDouble: Unreal refuses to link an
+   * integer pin to a real one ("Convert Integer to Float"), while TypeScript sees two numbers. A float pin takes the double as it is.
+   */
   private expr(node: ts.Expression, expected?: BpType, inCond = false): HirExpr {
+    return this.toReal(this.exprOf(node, expected, inCond), expected);
+  }
+
+  private toReal(e: HirExpr, expected: BpType | undefined): HirExpr {
+    if (expected !== "float" && expected !== "double" && expected !== "real") return e;
+    const conv = INT_TO_REAL[e.type];
+    if (conv === undefined || e.k === "lit" || (e.k === "local" && this.literalLocals.has(e.id))) return e;
+    return {
+      k: "call",
+      owner: MATH_LIBRARY,
+      name: conv.fn,
+      target: null,
+      static: true,
+      pure: true,
+      execOutputs: null,
+      args: [{ pin: conv.pin, value: e }],
+      outs: [{ pin: "ReturnValue", type: "double" }],
+      type: "double",
+      span: e.span,
+    };
+  }
+
+  private exprOf(node: ts.Expression, expected?: BpType, inCond = false): HirExpr {
     const hole = this.holes.get(node);
     if (hole) return hole;
     if (ts.isParenthesizedExpression(node)) return this.expr(node.expression, expected, inCond);

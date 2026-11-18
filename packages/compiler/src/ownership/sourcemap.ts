@@ -126,6 +126,33 @@ export function mapCompileMessages(
   return located && fallbackOfUnowned.size > 0 ? out.filter((d) => !fallbackOfUnowned.has(d)) : out;
 }
 
+/**
+ * Puts the compile errors that caused a failure before their echo. Unreal compiles the applied Blueprints together: one function that
+ * fails to compile (an int linked to a float pin) leaves it missing, and every call to an own function in every class then reports
+ * `Could not find a function named "X"`. When other errors exist, those come first and the echoes are folded into one error per
+ * missing function (at its first call, with the number of calls); otherwise the list is unchanged.
+ */
+export function orderCompileDiagnostics(ds: Diagnostic[]): Diagnostic[] {
+  const missingFn = (d: Diagnostic): string | undefined => (d.severity === "error" ? NO_FUNCTION.exec(d.message)?.[1] : undefined);
+  const primary = ds.filter((d) => missingFn(d) === undefined);
+  if (!primary.some((d) => d.severity === "error") || primary.length === ds.length) return ds;
+  const byFn = new Map<string, Diagnostic[]>();
+  for (const d of ds) {
+    const fn = missingFn(d);
+    if (fn !== undefined) byFn.set(fn, [...(byFn.get(fn) ?? []), d]);
+  }
+  const folded = [...byFn].map(([fn, list]) => {
+    const first = list[0]!;
+    const assets = new Set(list.map((d) => d.asset ?? ""));
+    const where = list.length === 1 ? "1 call" : `${list.length} calls${assets.size > 1 ? ` in ${assets.size} assets` : ""}`;
+    return {
+      ...first,
+      message: `[Unreal] Could not find a function named "${fn}" (${where}; most likely an echo of the errors above: a function that fails to compile is missing for every caller)`,
+    };
+  });
+  return [...primary, ...folded];
+}
+
 const SPEC_PREFIX = /\[spec:([A-Za-z0-9_]+)\]/;
 const SPEC_PREFIX_ALL = /\[spec:[A-Za-z0-9_]+\]\s*/g;
 const NO_FUNCTION = /Could not find a function named "([^"]+)"/;
