@@ -576,6 +576,18 @@ export class FakeBackend implements Backend {
     v.type = type;
   }
 
+  /** The Mod Editor saved a variable into the real mod's copy of `asset` (the stage keeps its own copy until a sync or refresh). */
+  addRealModVariable(asset: string, name: string, type: string): void {
+    const a = this.published?.get(asset);
+    if (a === undefined) throw new Error(`fake mod: no published asset ${asset}`);
+    a.variables.push({ name, type });
+  }
+
+  /** The backend gains or loses the staging_refresh tool (a backend patch applied between commands). */
+  setStageRefresh(on: boolean): void {
+    this.infoValue.capabilities.stageRefresh = on;
+  }
+
   addHandMadeVariable(asset: string, name: string, type: string): void {
     const a = this.assets.get(asset);
     if (a === undefined) throw new Error(`fake stage: no asset ${asset}`);
@@ -727,11 +739,24 @@ export class FakeBackend implements Backend {
     return { mod: "TestMod", files: this.assets.size, stagingPath: join(this.root, "stage") };
   }
 
-  /** `staging_refresh`: only the stale files come over from the real mod; the staged assets and edits stay. */
-  async refreshStage(_mod: string): Promise<{ copied: string[]; removed: string[] }> {
-    this.calls.push({ tool: "staging_refresh" });
-    const copied = [...this.stageStale];
+  /** `staging_refresh`: only the stale files (and the conflicts in `takeMod`) come over from the real mod; the rest of the stage stays. */
+  async refreshStage(_mod: string, takeMod: readonly string[] = []): Promise<{ copied: string[]; removed: string[] }> {
+    this.calls.push({ tool: "staging_refresh", ...(takeMod.length > 0 ? { label: takeMod.join(",") } : {}) });
+    const refused = this.stageConflicts.filter((c) => !takeMod.includes(c));
+    if (refused.length > 0) throw new Error(`fake staging_refresh: conflicts ${refused.join(", ")}`);
+    const copied = [...this.stageStale, ...this.stageConflicts];
+    for (const rel of copied) {
+      // the real mod's version of an asset file replaces the staged one (the mod is what was published)
+      const m = /^Content\/(.+)\.uasset$/i.exec(rel);
+      if (m === null) continue;
+      const path = [...this.assets.keys(), ...(this.published?.keys() ?? [])].find((p) => p.split("/").slice(2).join("/").toLowerCase() === m[1]!.toLowerCase());
+      if (path === undefined) continue;
+      const real = this.published?.get(path);
+      if (real !== undefined) this.assets.set(path, structuredClone(real));
+      this.changed.delete(rel);
+    }
     this.stageStale = [];
+    this.stageConflicts = [];
     this.mirrorFiles(); // synced_at stays: the stage was not made again
     return { copied, removed: [] };
   }

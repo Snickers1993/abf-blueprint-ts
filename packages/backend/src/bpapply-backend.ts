@@ -224,8 +224,8 @@ export class BpApplyBackend implements Backend {
     };
   }
 
-  async refreshStage(mod: string): Promise<{ copied: string[]; removed: string[] }> {
-    const { json } = await this.call("staging_refresh", { mod });
+  async refreshStage(mod: string, takeMod: readonly string[] = []): Promise<{ copied: string[]; removed: string[] }> {
+    const { json } = await this.call("staging_refresh", takeMod.length > 0 ? { mod, take_mod: [...takeMod] } : { mod });
     this.warmStarted = false; // like staging_sync, it stops the warm session (the editor would keep the old packages loaded)
     return { copied: strList(json.copied), removed: strList(json.removed) };
   }

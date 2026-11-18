@@ -6,7 +6,7 @@ Every patch is optional. abfc checks the backend's tool list and `backend_info`,
 
 ## Apply order
 
-All nine apply cleanly, in this order, on upstream commit `4e77497`:
+All ten apply cleanly, in this order, on upstream commit `4e77497`:
 
 | # | Patch | What it adds |
 | --- | --- | --- |
@@ -18,7 +18,8 @@ All nine apply cleanly, in this order, on upstream commit `4e77497`:
 | 6 | `backend-override-access.patch` | an override entry carries the parent function's access specifier, else the editor refuses the compile |
 | 7 | `backend-override-no-access-bits.patch` | refines 6: without an explicit access the override entry has no access bits and inherits the parent's |
 | 8 | `backend-staging-refresh.patch` | tool `staging_refresh`: copies only the files the real mod changed into the stage and keeps the rest (no full re-sync when only files abfc does not build were saved) |
-| 9 | `backend-raw-memory-guards.patch` | crash guard for the editor-side raw memory scans: a number that only looks like a pointer is checked with `VirtualQuery` before it is read (an unchecked read is an access violation that kills the editor), and the array-offset probes use a second count to rule out stray matches |
+| 9 | `backend-staging-refresh-take-mod.patch` | `staging_refresh` gains `take_mod`: a conflict listed there (an owned Blueprint saved in the Mod Editor while the stage changed it too) takes the real file instead of refusing the refresh |
+| 10 | `backend-raw-memory-guards.patch` | crash guard for the editor-side raw memory scans: a number that only looks like a pointer is checked with `VirtualQuery` before it is read (an unchecked read is an access violation that kills the editor), and the array-offset probes use a second count to rule out stray matches |
 
 ## Applying
 

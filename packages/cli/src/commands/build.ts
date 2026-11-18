@@ -48,7 +48,7 @@ import {
 } from "./common.js";
 import { refreshTagsFile } from "../tags.js";
 import { deleteRetiredRows, runAssetOps, runParentChange } from "./assetops.js";
-import { abfcPackages, ensureStage } from "./stage.js";
+import { clearRefreshPending, ensureStage, refreshSets } from "./stage.js";
 import { ensureStubsForBuild, ensureUsedStubsForBuild } from "./generate.js";
 
 /** True for an @event whose doc comment is its tooltip: the backend only writes it with the bp_apply feature `event_meta`. */
@@ -193,13 +193,16 @@ async function buildInner(ctx: CliContext, session: BackendSession, rec: Recorde
   if (emitAll(ctx, opsPlan.diagnostics)) return FAILED_BUILD;
 
   const tStage = performance.now();
-  // Files of these assets changed in the mod need the full re-sync (their nodes and manifests); any other change is copied alone.
-  const abfcAssets = abfcPackages(projectDir, [...owned, ...structAssets].map((a) => a.path));
-  const { status: stage, resynced, changedInMod } = await ensureStage(backend, env, config, {
+  // What the Mod Editor saved is copied into the stage alone when it can be (an owned Blueprint has the TypeScript applied on top
+  // again); a struct or a rename source needs the full re-sync.
+  const refresh = caps.stageRefresh
+    ? refreshSets(projectDir, paths.stageRefreshedFile, owned.map((a) => a.path), structAssets.map((a) => a.path))
+    : undefined;
+  const { status: stage, resynced, changedInMod, refreshedOwned } = await ensureStage(backend, env, config, {
     resync: args.flags.resync,
     warn: (d) => output.diag(d),
     progress: ctx.progress,
-    ...(caps.stageRefresh ? { refreshUnless: abfcAssets, note: (line: string) => output.info(line, "dim") } : {}),
+    ...(refresh !== undefined ? { refresh, note: (line: string) => output.info(line, "dim") } : {}),
   });
   // Reads of assets whose stage files (and referenced mod files) are byte-identical to an earlier read come from .abfc/cache/reads,
   // not the editor: after a re-sync that is every asset nobody saved. `--full` (build and publish) reads everything from the editor.
@@ -215,13 +218,15 @@ async function buildInner(ctx: CliContext, session: BackendSession, rec: Recorde
   // owned asset counts as saved, so its class defaults are applied again (TypeScript wins). Only the re-sync after changed files
   // keeps the published assets that were not touched.
   if (resynced && changedInMod.length === 0) for (const a of owned) editedInMod.add(a.path.toLowerCase());
-  // A stage copied from the mod again holds no unpublished work: the manifests follow before anything is planned from them.
-  if (resynced) {
+  // A stage copied from the mod again holds no unpublished work: the manifests follow before anything is planned from them. After a
+  // refresh only the owned Blueprints it took from the mod do.
+  const pruneOnly = !resynced && (refreshedOwned?.length ?? 0) > 0 ? new Set(refreshedOwned) : undefined;
+  if (resynced || pruneOnly !== undefined) {
     const tPrune = performance.now();
     const before = readCacheOf(ctx)?.missed.length ?? 0;
-    await pruneManifestsToStage(ctx, backend, mod, { ir, owned });
+    await pruneManifestsToStage(ctx, backend, mod, { ir, owned, ...(pruneOnly !== undefined ? { only: pruneOnly } : {}) });
     const why = missSummary(ctx, before);
-    if (why !== "") output.info(`after the re-sync, ${why}`, "dim");
+    if (why !== "") output.info(`after the ${resynced ? "re-sync" : "refresh"}, ${why}`, "dim");
     rec.record("build.prune", since(tPrune), true, (readCacheOf(ctx)?.missed.length ?? 0) - before);
   }
   rec.record("build.stage", since(tStage));
@@ -473,6 +478,7 @@ async function buildInner(ctx: CliContext, session: BackendSession, rec: Recorde
     refreshSources(new Set());
     if (!(await runDeferredDeletes())) return FAILED_BUILD;
     writeCache(ctx, owned, cache, stubLockHash, caps.eventMeta === true);
+    if (refresh !== undefined) clearRefreshPending(refresh.pendingFile);
     output.info(`up to date (${planned.upToDate.length} unit(s) unchanged)`, "ok");
     output.json({ applied: [], upToDate: planned.upToDate, ...opsJson });
     return { ok: true, upToDate: true, units: 0, assets: 0, unchanged: planned.upToDate.length };
@@ -834,6 +840,7 @@ async function buildInner(ctx: CliContext, session: BackendSession, rec: Recorde
   for (const m of report.messages) if (m.severity === "warning" && args.flags.verbose) output.info(`[Unreal warning] ${m.message}`, "warn");
 
   writeCache(ctx, owned, cache, stubLockHash, caps.eventMeta === true);
+  if (refresh !== undefined) clearRefreshPending(refresh.pendingFile);
   output.info(`applied ${stagedUnits.length > 0 ? stagedUnits.join(", ") : "no units"} in ${appliedAssets.join(", ")} (route: ${route})${createdStructs.length > 0 ? `, created struct ${createdStructs.join(", ")}` : ""}${removedUnits.length > 0 ? `, removed ${removedUnits.join(", ")}` : ""}${removedOrphanTags > 0 ? `, removed ${removedOrphanTags} orphan tag comment(s)` : ""}`, "ok");
   output.json({ applied: stagedUnits, assets: appliedAssets, ...(createdStructs.length > 0 ? { structs: createdStructs } : {}), route, upToDate: planned.upToDate, ...(removedUnits.length > 0 ? { removed: removedUnits } : {}), ...(removedOrphanTags > 0 ? { removedOrphanTags } : {}), ...opsJson });
   return { ok: true, upToDate: false, units: stagedUnits.length, assets: appliedAssets.length, unchanged: planned.upToDate.length };

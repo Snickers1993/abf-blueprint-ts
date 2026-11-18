@@ -88,6 +88,8 @@ export interface CliPaths {
   manifestDir: string;
   sourcemapDir: string;
   runsFile: string;
+  /** Files `staging_refresh` copied into the stage that no build has applied the TypeScript on top of yet. */
+  stageRefreshedFile: string;
 }
 
 export interface CliContext {
@@ -110,6 +112,7 @@ export function pathsFor(projectDir: string): CliPaths {
     manifestDir: win32.join(abfcDir, "manifest"),
     sourcemapDir: win32.join(abfcDir, "sourcemaps"),
     runsFile: win32.join(abfcDir, "runs.jsonl"),
+    stageRefreshedFile: win32.join(abfcDir, "stage-refreshed.json"),
   };
 }
 

@@ -44,7 +44,7 @@ import type { StubMode } from "../stubsauto.js";
 import { stagePackageHash } from "../readcache.js";
 import { refreshTagsFile } from "../tags.js";
 import { BackendSession, Recorder, backendStartOptions, missSummary, pruneManifestsToStage, readCacheFor, readCacheOf, since, useReadCache } from "./common.js";
-import { abfcPackages, ensureStage } from "./stage.js";
+import { ensureStage, refreshSets } from "./stage.js";
 
 /** Folders of the mod's Content that are never stubbed. */
 const SKIPPED_FOLDERS = ["_McpTest", "_McpTmp"];
@@ -625,7 +625,7 @@ export async function generateStubs(ctx: CliContext, backend: Backend, mode: Stu
     resync: mode === "explicit" ? flags.resync : false,
     warn: (d) => output.diag(d),
     progress: ctx.progress,
-    ...(info.capabilities.stageRefresh ? { refreshUnless: abfcPackages(ctx.projectDir), note: (line: string) => output.info(line, "dim") } : {}),
+    ...(info.capabilities.stageRefresh ? { refresh: refreshSets(ctx.projectDir, paths.stageRefreshedFile), note: (line: string) => output.info(line, "dim") } : {}),
   });
   // The re-sync's manifest check reads every owned asset: from the read cache when its files are as an earlier read saw them
   // (it used to read all of them from the editor, about 30 s each, on every `generate --resync`). `--full` reads from the editor.

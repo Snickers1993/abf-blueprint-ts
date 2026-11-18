@@ -273,17 +273,28 @@ export function unitsHeldByStage<U extends ManifestUnit>(units: readonly U[], st
  * The read cache of a staging copy (null when the stage path is unknown). Its identity is the backend and editor; reads cached by
  * versions that also keyed on the stub lock are accepted and moved over.
  */
+/** Backend capabilities that say nothing about bp_read output (kept out of the read cache identity). */
+export const READ_NEUTRAL_CAPS: readonly string[] = ["stageRefresh"];
+
 export function readCacheFor(ctx: CliContext, info: BackendInfo, stagingPath: string): ReadCache | null {
   if (stagingPath === "") return null;
   const profile = ctx.env.profile;
-  const base = { server: info.serverVersion, engine: info.engineVersion, ext: info.extensions, caps: info.capabilities };
+  // Capabilities that do not change what bp_read returns stay out of the identity: a backend patch that only adds such a tool
+  // (staging_refresh) must not send every read back to the editor. List any new capability of that kind here.
+  const caps: Record<string, unknown> = { ...info.capabilities };
+  for (const k of READ_NEUTRAL_CAPS) delete caps[k];
+  const base = { server: info.serverVersion, engine: info.engineVersion, ext: info.extensions, caps };
   const classOnly = new Set((ctx.config.stubs.classOnly ?? []).map((a) => a.toLowerCase()));
   return new ReadCache(
     ctx.paths.cacheDir,
     stagingPath,
     ctx.config.mod.name,
     readCacheIdentity({ ...base, profile: profile.id }),
-    [readCacheIdentity({ ...base, stubs: stubLockHashOf(readLock(win32.join(ctx.paths.stubsDir, profile.id))), profile: profile.id })],
+    [
+      readCacheIdentity({ ...base, stubs: stubLockHashOf(readLock(win32.join(ctx.paths.stubsDir, profile.id))), profile: profile.id }),
+      // abfc 5951218..ca7cda3 kept stageRefresh in the identity: those reads are just as valid
+      readCacheIdentity({ ...base, caps: info.capabilities, profile: profile.id }),
+    ],
     classOnly,
   );
 }
@@ -329,6 +340,8 @@ export async function pruneManifestsToStage(
     appliedAssets?: readonly string[];
     ir?: IrModule;
     owned?: readonly IrAsset[];
+    /** Only these assets (lowercase paths): the ones a refresh took from the real mod. */
+    only?: ReadonlySet<string>;
   } = {},
 ): Promise<void> {
   const { projectDir } = ctx;
@@ -337,6 +350,7 @@ export async function pruneManifestsToStage(
   const assets = new Set(appliedAssets);
   for (const m of listManifests(projectDir)) if (m.asset.startsWith(`/${mod}/`)) assets.add(m.asset);
   for (const asset of assets) {
+    if (o.only !== undefined && !o.only.has(asset.toLowerCase())) continue;
     try {
       const current = readManifest(projectDir, asset);
       const base = o.base?.get(asset) ?? current;
