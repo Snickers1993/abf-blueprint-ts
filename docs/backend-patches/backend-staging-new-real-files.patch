@@ -1,0 +1,46 @@
+diff --git a/staging.py b/staging.py
+index c5661c3..52cbdb2 100644
+--- a/staging.py
++++ b/staging.py
+@@ -216,7 +216,7 @@ def refresh(mod, take_mod=()):
+             base.pop(rel, None)
+             removed.append(rel)
+     for rel in _tracked_files(src):
+-        if rel in known:
++        if rel in known or rel in copied:      # (diff() lists new real files as stale too: copied above)
+             continue
+         dst = stage.dir / rel
+         dst.parent.mkdir(parents=True, exist_ok=True)
+@@ -316,6 +316,12 @@ def diff(stage):
+     for rel in base:
+         if rel not in now and not _is_tooling(rel):
+             removed.append(rel)
++    if src is not None and src.is_dir():
++        # New in the real mod since the sync (a Blueprint made and saved in the Mod Editor): the stage never had it, so it
++        # was invisible until a full staging_sync; staging_refresh copies it like any other stale file.
++        for rel in _tracked_files(src):
++            if rel not in base and rel not in now:
++                stale.append(rel)
+     return {"changed": sorted(changed), "added": sorted(added), "removed": sorted(removed), "conflicts": conflicts,
+             "stale": sorted(stale)}
+ 
+diff --git a/tests/test_unit.py b/tests/test_unit.py
+index c7a2af9..5be9ce2 100644
+--- a/tests/test_unit.py
++++ b/tests/test_unit.py
+@@ -1110,6 +1110,15 @@ class StagingTests(unittest.TestCase):
+             staging.refresh("Fake", take_mod=["Content/A.uasset"])
+         self.assertEqual((self.stage.dir / "Content" / "A.uasset").read_bytes(), b"staged edit")
+ 
++    def test_a_file_new_in_the_real_mod_is_stale_and_refresh_copies_it(self):
++        (self.real / "Content" / "New").mkdir(parents=True, exist_ok=True)
++        (self.real / "Content" / "New" / "BP_Made.uasset").write_bytes(b"made in the Mod Editor")
++        self.assertIn("Content/New/BP_Made.uasset", staging.diff(self.stage)["stale"])
++        r = staging.refresh("Fake")
++        self.assertIn("Content/New/BP_Made.uasset", r["copied"])
++        self.assertEqual((self.stage.dir / "Content" / "New" / "BP_Made.uasset").read_bytes(), b"made in the Mod Editor")
++        self.assertEqual(staging.diff(self.stage)["stale"], [])
++
+     def test_nothing_stale_when_the_real_mod_is_unchanged(self):
+         self.assertEqual(staging.diff(self.stage)["stale"], [])
+ 

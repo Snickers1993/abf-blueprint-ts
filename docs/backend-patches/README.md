@@ -6,7 +6,7 @@ Every patch is optional. abfc checks the backend's tool list and `backend_info`,
 
 ## Apply order
 
-All thirteen apply cleanly, in this order, on upstream commit `4e77497`:
+All fourteen apply cleanly, in this order, on upstream commit `4e77497`:
 
 | # | Patch | What it adds |
 | --- | --- | --- |
@@ -23,6 +23,7 @@ All thirteen apply cleanly, in this order, on upstream commit `4e77497`:
 | 11 | `backend-warm-reload-changed-only.patch` | the warm editor reloads, before each job, only the mod packages whose files changed since it last matched them (plus what references them and anything modified in memory), instead of every loaded package: reads had grown from 25 s to 100 s each as more packages were loaded and re-saved sounds rebuilt their audio data on every reload |
 | 12 | `backend-warm-reload-after-blueprint-jobs.patch` | refines 11: after a job that changes Blueprints (apply, compile, asset ops) only plain data (sounds, meshes, textures, materials) keeps its match; Blueprints, levels and tables are reloaded by the next job, because a compile can change them in memory without marking them modified |
 | 13 | `backend-live-publish-instance-guard.patch` | a live publish refuses (before anything is unloaded) when more than 300 actors of the published classes are in the open level (`ABF_LIVE_PUBLISH_MAX_INSTANCES` changes it, 0 switches it off): one publish of 41 classes with about 1,140 preview actors crashed the editor |
+| 14 | `backend-staging-new-real-files.patch` | `staging_status` lists a file that is new in the real mod (a Blueprint made and saved in the Mod Editor) as stale, so `staging_refresh` copies it; before, it reached the stage only with a full `staging_sync` |
 
 ## Applying
 
