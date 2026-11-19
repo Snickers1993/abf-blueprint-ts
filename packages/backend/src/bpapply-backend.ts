@@ -163,6 +163,8 @@ export class BpApplyBackend implements Backend {
   private warmAvailable = false;
   private warmStarted = false;
   private warmFailed = false;
+  /** Why the warm session did not start (every commandlet operation of this run is cold), or null. */
+  warmStartError: string | null = null;
   /** True when the most recent commandlet operation ran on the warm session. */
   lastWarm = false;
 
@@ -520,8 +522,9 @@ export class BpApplyBackend implements Backend {
     try {
       await this.call("warm_session", { action: "start", mod }, { timeoutMs: 300_000 });
       this.warmStarted = true;
-    } catch {
+    } catch (e) {
       this.warmFailed = true;
+      this.warmStartError = (e instanceof Error ? e.message : String(e)).slice(0, 300);
     }
   }
 

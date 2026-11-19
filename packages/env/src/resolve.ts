@@ -14,7 +14,7 @@ import {
 } from "./discover.js";
 import type { Host } from "./discover.js";
 import { AbfcError, envWarning } from "./errors.js";
-import { editorFingerprint } from "./fingerprint.js";
+import { editorFingerprints } from "./fingerprint.js";
 import { loadProfile, profileForBuild } from "./profile.js";
 import { assertNotInModFolder } from "./project.js";
 import type { Resolved } from "./settings.js";
@@ -36,6 +36,8 @@ export interface Environment {
   /** Epic manifest `AppVersionString` of the editor install, when known. */
   appVersion: string | null;
   fingerprint: string | null;
+  /** Fingerprints earlier abfc versions recorded for the same editor build ({@link sameEditorBuild}). */
+  fingerprintAliases: string[];
   /** Warnings and errors collected on the way; nothing is thrown except ABFC1020 and ABFC1021. */
   diagnostics: Diagnostic[];
 }
@@ -161,9 +163,10 @@ export function resolveEnvironment(
   }
 
   let fingerprint: string | null = null;
+  let fingerprintAliases: string[] = [];
   if (editorRoot.value !== null) {
     try {
-      fingerprint = editorFingerprint(host, editorRoot.value, profile, appVersion);
+      [fingerprint, ...fingerprintAliases] = editorFingerprints(host, editorRoot.value, profile, appVersion) as [string, ...string[]];
     } catch (e) {
       failed<string>(e, diagnostics);
     }
@@ -194,6 +197,7 @@ export function resolveEnvironment(
     headlessDir,
     appVersion,
     fingerprint,
+    fingerprintAliases,
     diagnostics,
   };
 }

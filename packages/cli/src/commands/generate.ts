@@ -5,7 +5,7 @@ import { win32 } from "node:path";
 import type { Backend, ReflectData } from "@abfc/backend";
 import { libraryEntriesOf, loadProgram, ownedSets, placeholderTypesUsed, sourceStubImports } from "@abfc/compiler";
 import type { LoadedProgram } from "@abfc/compiler";
-import { AbfcError, runtimeLayout } from "@abfc/env";
+import { AbfcError, runtimeLayout, sameEditorBuild } from "@abfc/env";
 import {
   classesWithoutSupers,
   COVERAGE_FILE,
@@ -128,10 +128,10 @@ interface ModReads {
   assets: Record<string, { files: string; owned: string; skipped?: true; shallow?: true }>;
 }
 
-function readModReads(profileDir: string, identity: string): ModReads["assets"] {
+function readModReads(profileDir: string, identities: readonly string[]): ModReads["assets"] {
   try {
     const r = JSON.parse(readFileSync(win32.join(profileDir, MOD_READS_FILE), "utf8")) as ModReads;
-    if (r.version === MOD_READS_VERSION && r.identity === identity && typeof r.assets === "object" && r.assets !== null) return r.assets;
+    if (r.version === MOD_READS_VERSION && identities.includes(r.identity) && typeof r.assets === "object" && r.assets !== null) return r.assets;
   } catch {
     // missing or damaged: every asset is read
   }
@@ -225,8 +225,10 @@ async function reflectAndRead(ctx: CliContext, backend: Backend, run: StubRun): 
   }
   const t0 = clock();
   const readsIdentity = `${STUBGEN_VERSION}|${env.fingerprint ?? ""}`;
+  // reads recorded under an older fingerprint of the same editor build (with the launcher's app version) count too
+  const readsIdentities = [readsIdentity, ...(env.fingerprintAliases ?? []).map((f) => `${STUBGEN_VERSION}|${f}`)];
   const profileDirForReads = win32.join(paths.stubsDir, env.profile.id);
-  const priorReads = run.seed === null || run.readAllModAssets ? {} : readModReads(profileDirForReads, readsIdentity);
+  const priorReads = run.seed === null || run.readAllModAssets ? {} : readModReads(profileDirForReads, readsIdentities);
   const reads: ModReads["assets"] = {};
   let unchanged = 0;
   /** Why each mod asset that was read went to the editor (shown after the reads, so a slow run says what changed). */
@@ -640,7 +642,7 @@ export async function generateStubs(ctx: CliContext, backend: Backend, mode: Stu
 
   // The class catalog of this editor build: the file when it is current, else from the backend.
   let catalog: { catalog: Catalog; sha256: string } | null = flags.refresh ? null : readCatalog(profileDir);
-  if (catalog !== null && catalog.catalog.editorFingerprint !== fingerprint) catalog = null;
+  if (catalog !== null && !sameEditorBuild(env, catalog.catalog.editorFingerprint)) catalog = null;
   if (catalog === null) {
     if (info.capabilities.catalog) {
       const tc = clock();
@@ -667,7 +669,7 @@ export async function generateStubs(ctx: CliContext, backend: Backend, mode: Stu
 
   // The cache of the last run: valid for this editor build and generator (a backend without a catalog always reflects everything it is asked for).
   const cache = flags.refresh || catalog === null ? null : readStubCache(profileDir);
-  const seed = cache !== null && cache.editorFingerprint === fingerprint && cache.generator === STUBGEN_VERSION ? cache : null;
+  const seed = cache !== null && sameEditorBuild(env, cache.editorFingerprint) && cache.generator === STUBGEN_VERSION ? cache : null;
   const full = catalog !== null && seed === null;
   const storedCoverage = seed === null ? null : readCoverage(profileDir);
   const coverage = seed === null ? null : (storedCoverage ?? coverageOf(seed.reflect, [], []));
@@ -832,7 +834,7 @@ export async function ensureStubsForBuild(ctx: CliContext, session: BackendSessi
   if (!opened.info.capabilities.reflect || !opened.info.capabilities.catalog) {
     // Remember it in the lock: later builds stay quiet (and do not start the backend for this) until the editor build or the backend changes.
     const lock = readLock(win32.join(ctx.paths.stubsDir, ctx.env.profile.id));
-    if (lock !== null && (ctx.env.fingerprint === null || lock.editorFingerprint === ctx.env.fingerprint)) {
+    if (lock !== null && sameEditorBuild(ctx.env, lock.editorFingerprint)) {
       writeLock(win32.join(ctx.paths.stubsDir, ctx.env.profile.id), {
         ...lock,
         auto: { catalogSha256: "", gameClasses: 0, failed: lock.auto?.failed ?? [], added: lock.auto?.added ?? [], noCatalog: backendIdOf(ctx.env) },

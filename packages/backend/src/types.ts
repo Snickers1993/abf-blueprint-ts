@@ -217,6 +217,8 @@ export interface AssetOpsResult {
 export interface Backend {
   /** True when the most recent commandlet operation (read, apply, compile, reflect) ran on the warm session. */
   readonly lastWarm?: boolean;
+  /** Why the warm session failed to start, when it did (every later commandlet operation of the run is cold). */
+  readonly warmStartError?: string | null;
   info(): Promise<BackendInfo>;
   stage(modDir: string, o: { discardChanges: boolean }): Promise<StageReport>;
   stageStatus(mod: string): Promise<StageStatus | null>;

@@ -6,7 +6,7 @@ Every patch is optional. abfc checks the backend's tool list and `backend_info`,
 
 ## Apply order
 
-All ten apply cleanly, in this order, on upstream commit `4e77497`:
+All eleven apply cleanly, in this order, on upstream commit `4e77497`:
 
 | # | Patch | What it adds |
 | --- | --- | --- |
@@ -20,6 +20,7 @@ All ten apply cleanly, in this order, on upstream commit `4e77497`:
 | 8 | `backend-staging-refresh.patch` | tool `staging_refresh`: copies only the files the real mod changed into the stage and keeps the rest (no full re-sync when only files abfc does not build were saved) |
 | 9 | `backend-staging-refresh-take-mod.patch` | `staging_refresh` gains `take_mod`: a conflict listed there (an owned Blueprint saved in the Mod Editor while the stage changed it too) takes the real file instead of refusing the refresh |
 | 10 | `backend-raw-memory-guards.patch` | crash guard for the editor-side raw memory scans: a number that only looks like a pointer is checked with `VirtualQuery` before it is read (an unchecked read is an access violation that kills the editor), and the array-offset probes use a second count to rule out stray matches |
+| 11 | `backend-warm-reload-changed-only.patch` | the warm editor reloads, before each job, only the mod packages whose files changed since it last matched them (plus what references them and anything modified in memory), instead of every loaded package: reads had grown from 25 s to 100 s each as more packages were loaded and re-saved sounds rebuilt their audio data on every reload |
 
 ## Applying
 

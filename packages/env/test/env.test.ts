@@ -7,6 +7,8 @@ import {
   checkHeadlessDir,
   checkNode,
   editorFingerprint,
+  editorFingerprints,
+  sameEditorBuild,
   exitCodeFor,
   findBackendDir,
   findDocuments,
@@ -112,14 +114,24 @@ test("profileForBuild matches the build tag and rejects unknown builds", () => {
   assert.equal(profileForBuild(null), null);
 });
 
-test("editorFingerprint changes with the exe and the app version", () => {
+test("editorFingerprint changes with the exe, not with the launcher's app version", () => {
   const root = "D:\\ed";
   const a = fakeHost({ files: { [exeAt(root)]: "aaaa" } });
   const b = fakeHost({ files: { [exeAt(root)]: "aaaaaa" } });
   const f1 = editorFingerprint(a, root, profile, "v1");
   assert.equal(f1, editorFingerprint(a, root, profile, "v1"));
   assert.notEqual(f1, editorFingerprint(b, root, profile, "v1"));
-  assert.notEqual(f1, editorFingerprint(a, root, profile, "v2"));
+  // the launcher writing a version into its manifest (or changing it) is not a new editor build
+  assert.equal(f1, editorFingerprint(a, root, profile, "v2"));
+  assert.equal(f1, editorFingerprint(a, root, profile, null));
+  // what earlier versions recorded with a version still counts as this build
+  const [fp, ...aliases] = editorFingerprints(a, root, profile, "v1");
+  assert.equal(fp, f1);
+  assert.equal(aliases.length, 1);
+  assert.ok(sameEditorBuild({ fingerprint: fp!, fingerprintAliases: aliases }, aliases[0]));
+  assert.ok(sameEditorBuild({ fingerprint: fp!, fingerprintAliases: aliases }, f1));
+  assert.ok(!sameEditorBuild({ fingerprint: fp!, fingerprintAliases: aliases }, editorFingerprint(b, root, profile, "v1")));
+  assert.ok(sameEditorBuild({ fingerprint: null }, "anything"));
 });
 
 // ------------------------------------------------------------------ Documents

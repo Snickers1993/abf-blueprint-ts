@@ -221,9 +221,15 @@ export async function readAsset(ctx: CliContext, backend: Backend, asset: string
   const shortOf = (p: string): string => (p.toLowerCase().startsWith(prefix.toLowerCase()) ? p.slice(prefix.length) : p);
   const why = miss === undefined || miss.asset !== asset ? "" : miss.reason === "dep" && miss.dep !== undefined ? ` (${shortOf(miss.dep)} changed)` : ` (${missLabel(miss.reason)})`;
   editorReads.set(ctx, (editorReads.get(ctx) ?? 0) + 1);
-  ctx.output.info(`  read ${shortOf(asset)} from the editor in ${seconds.toFixed(1)} s${why} [${editorReads.get(ctx)}]`, "dim");
+  // a cold read starts a hidden editor for the one asset (about 50-100 s on a big mod); a warm one reuses the running session
+  const mode = backend.lastWarm === true ? "warm" : "cold";
+  if (mode === "cold" && backend.warmStartError != null && !warmErrorShown.has(ctx)) {
+    warmErrorShown.add(ctx);
+    ctx.output.info(`  the warm editor did not start (${backend.warmStartError}): every editor step of this run starts its own editor`, "warn");
+  }
+  ctx.output.info(`  read ${shortOf(asset)} from the editor in ${seconds.toFixed(1)} s, ${mode}${why} [${editorReads.get(ctx)}]`, "dim");
   try {
-    recordRun(ctx.paths.runsFile, { at: new Date().toISOString(), step: "read.editor", seconds, ok: true, mode: "cold", asset });
+    recordRun(ctx.paths.runsFile, { at: new Date().toISOString(), step: "read.editor", seconds, ok: true, mode, asset });
   } catch {
     // timings only
   }
@@ -231,6 +237,7 @@ export async function readAsset(ctx: CliContext, backend: Backend, asset: string
 }
 
 /** Editor reads of this run, for the running count on each read line. */
+const warmErrorShown = new WeakSet<CliContext>();
 const editorReads = new WeakMap<CliContext, number>();
 
 function missLabel(reason: string): string {
