@@ -6,7 +6,7 @@ Every patch is optional. abfc checks the backend's tool list and `backend_info`,
 
 ## Apply order
 
-All eleven apply cleanly, in this order, on upstream commit `4e77497`:
+All thirteen apply cleanly, in this order, on upstream commit `4e77497`:
 
 | # | Patch | What it adds |
 | --- | --- | --- |
@@ -21,6 +21,8 @@ All eleven apply cleanly, in this order, on upstream commit `4e77497`:
 | 9 | `backend-staging-refresh-take-mod.patch` | `staging_refresh` gains `take_mod`: a conflict listed there (an owned Blueprint saved in the Mod Editor while the stage changed it too) takes the real file instead of refusing the refresh |
 | 10 | `backend-raw-memory-guards.patch` | crash guard for the editor-side raw memory scans: a number that only looks like a pointer is checked with `VirtualQuery` before it is read (an unchecked read is an access violation that kills the editor), and the array-offset probes use a second count to rule out stray matches |
 | 11 | `backend-warm-reload-changed-only.patch` | the warm editor reloads, before each job, only the mod packages whose files changed since it last matched them (plus what references them and anything modified in memory), instead of every loaded package: reads had grown from 25 s to 100 s each as more packages were loaded and re-saved sounds rebuilt their audio data on every reload |
+| 12 | `backend-warm-reload-after-blueprint-jobs.patch` | refines 11: after a job that changes Blueprints (apply, compile, asset ops) only plain data (sounds, meshes, textures, materials) keeps its match; Blueprints, levels and tables are reloaded by the next job, because a compile can change them in memory without marking them modified |
+| 13 | `backend-live-publish-instance-guard.patch` | a live publish refuses (before anything is unloaded) when more than 300 actors of the published classes are in the open level (`ABF_LIVE_PUBLISH_MAX_INSTANCES` changes it, 0 switches it off): one publish of 41 classes with about 1,140 preview actors crashed the editor |
 
 ## Applying
 

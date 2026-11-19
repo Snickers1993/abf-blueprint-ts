@@ -514,6 +514,12 @@ export function publishRefusal(mod: string, r: PublishResult): Diagnostic[] {
         );
       }
       if (/unsaved changes/.test(why)) return d("ABFC7005", `save or revert those assets in the Mod Editor, ${again}`);
+      if (/live instances/.test(why)) {
+        return d(
+          "ABFC7005",
+          `the open level holds many actors of the published classes (for example a runtime preview); swapping their classes live can crash the Mod Editor. Remove most of them, or close the Mod Editor (the copy then needs no live reload; ABF_LIVE_PUBLISH_MAX_INSTANCES on the backend changes the limit), ${again}`,
+        );
+      }
       if (/Play In Editor is running/.test(why)) return d("ABFC7005", `stop Play In Editor in the Mod Editor, ${again}`);
       return d("ABFC7005", `close the editors of those assets in the Mod Editor, ${again}`);
     }
