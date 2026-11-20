@@ -6,7 +6,7 @@ Every patch is optional. abfc checks the backend's tool list and `backend_info`,
 
 ## Apply order
 
-All fourteen apply cleanly, in this order, on upstream commit `4e77497`:
+All fifteen apply cleanly, in this order, on upstream commit `4e77497`:
 
 | # | Patch | What it adds |
 | --- | --- | --- |
@@ -24,6 +24,7 @@ All fourteen apply cleanly, in this order, on upstream commit `4e77497`:
 | 12 | `backend-warm-reload-after-blueprint-jobs.patch` | refines 11: after a job that changes Blueprints (apply, compile, asset ops) only plain data (sounds, meshes, textures, materials) keeps its match; Blueprints, levels and tables are reloaded by the next job, because a compile can change them in memory without marking them modified |
 | 13 | `backend-live-publish-instance-guard.patch` | a live publish refuses (before anything is unloaded) when more than 300 actors of the published classes are in the open level (`ABF_LIVE_PUBLISH_MAX_INSTANCES` changes it, 0 switches it off): one publish of 41 classes with about 1,140 preview actors crashed the editor |
 | 14 | `backend-staging-new-real-files.patch` | `staging_status` lists a file that is new in the real mod (a Blueprint made and saved in the Mod Editor) as stale, so `staging_refresh` copies it; before, it reached the stage only with a full `staging_sync` |
+| 15 | `backend-no-zen-autolaunch.patch` | every headless commandlet, `-game` test run, warm session and hidden windowed instance starts with `-NoZenAutoLaunch`: a hidden windowed run with its own `LOCALAPPDATA` installed and launched a second zenserver on the default port 8558, King's shared Zen derived-data store was recreated, and the mod's meshes stopped drawing in Play until the store was rebuilt. With it, those runs still use the zenserver that is already running (the editor's own), so they do not have a separate store |
 
 ## Applying
 
