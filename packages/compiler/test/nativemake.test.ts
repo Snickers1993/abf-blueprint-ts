@@ -97,4 +97,25 @@ test("a Vector literal lowers to KismetMathLibrary.MakeVector, not a Make Struct
   assert.deepEqual(mk[0]!.pinDefaults, { X: "1.0", Z: "3.0" });
 });
 
+test("reading Vector fields lowers to KismetMathLibrary.BreakVector, not a Break Struct node", () => {
+  const hir: HirProgram = hirOf("    this.Far = this.Spot.X + this.Spot.Z;");
+  assert.deepEqual(hir.diagnostics, []);
+  const ir = lower(hir, profile);
+  assert.deepEqual(validateIrModule(ir), []);
+  const units = ir.assets.flatMap((a) => a.units);
+  const nodes = units.flatMap((u) => u.nodes);
+  const wires = units.flatMap((u) => u.wires);
+  // the editor rewrites a Break Struct on Vector into this call on compile/save, so emitting it keeps the saved graph as built
+  assert.equal(nodes.filter((n) => n.t3d.class === profile.nodeClasses.breakStruct).length, 0);
+  const brk = nodes.filter((n) => n.sem?.k === "call" && n.sem.function === "BreakVector");
+  assert.ok(brk.length >= 1);
+  for (const b of brk) {
+    assert.equal(b.sem?.k === "call" ? b.sem.class : undefined, "/Script/Engine.KismetMathLibrary");
+    assert.ok(b.t3d.props.includes("bIsPureFunc=True"));
+    assert.ok(wires.some(([, to]) => to === `${b.id}.InVec`), "the vector feeds InVec");
+  }
+  const outs = wires.map(([from]) => from).filter((f) => brk.some((b) => f.startsWith(`${b.id}.`)));
+  assert.deepEqual(outs.map((f) => f.split(".").pop()).sort(), ["X", "Z"]);
+});
+
 void codes;
