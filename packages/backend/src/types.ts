@@ -217,9 +217,17 @@ export interface AssetOpsResult {
 export interface Backend {
   /** True when the most recent commandlet operation (read, apply, compile, reflect) ran on the warm session. */
   readonly lastWarm?: boolean;
+  /** Why the warm session failed to start, when it did (every later commandlet operation of the run is cold). */
+  readonly warmStartError?: string | null;
   info(): Promise<BackendInfo>;
   stage(modDir: string, o: { discardChanges: boolean }): Promise<StageReport>;
   stageStatus(mod: string): Promise<StageStatus | null>;
+  /**
+   * `staging_refresh` (capability `stageRefresh`): the files the real mod changed are copied into the stage, the staged edits stay.
+   * A conflict listed in `takeMod` (stage-relative paths) takes the real file; any other conflict fails (an older backend patch
+   * without `take_mod` fails on every conflict).
+   */
+  refreshStage?(mod: string, takeMod?: readonly string[]): Promise<{ copied: string[]; removed: string[] }>;
   read(mod: string, asset: string): Promise<AssetSnapshot>;
   applySpecs(
     mod: string,

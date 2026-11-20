@@ -65,3 +65,29 @@ test("a float field takes a double and keeps its float type", () => {
   assert.ok(JSON.stringify(hir).includes('"Pace"'));
   assert.ok(/"name":"Pace","type":"float"|"type":"float"[^}]*"name":"Pace"/.test(JSON.stringify(hir)), "Pace is still a float variable");
 });
+
+// Unreal refuses to link an integer pin to a real one ("Convert Integer to Float"): an int value goes through Conv_IntToDouble.
+function convNodes(body: string): { calls: string[]; links: number } {
+  const hir = hirOf(body);
+  assert.deepEqual(hir.diagnostics, []);
+  const ir = lower(hir, profile);
+  assert.deepEqual(validateIrModule(ir), []);
+  const nodes = ir.assets.flatMap((a) => a.units.flatMap((u) => u.nodes));
+  const calls = nodes.flatMap((n) => (n.sem?.k === "call" ? [n.sem.function] : []));
+  return { calls, links: calls.filter((c) => c === "Conv_IntToDouble").length };
+}
+
+test("an int value into a float parameter, a double field or real arithmetic goes through Conv_IntToDouble", () => {
+  const viaConst = convNodes("    const n = this.Count * 90;\n    FakeSystem.SetTimerThing(this.Go, n);");
+  assert.equal(viaConst.links, 1, JSON.stringify(viaConst.calls));
+  assert.ok(viaConst.calls.includes("SetTimerThing"));
+  assert.equal(convNodes("    this.Far = this.Count * 2;").links, 1);
+  // a double times an int was ABFC2012; the int operand is converted
+  assert.equal(convNodes("    this.Far = this.Far * this.Count;").links, 1);
+});
+
+test("int literals, consts bound to one and int pins need no conversion", () => {
+  assert.equal(convNodes("    const k = 3;\n    FakeSystem.SetTimerThing(this.Go, k);").links, 0);
+  assert.equal(convNodes("    FakeSystem.SetTimerThing(this.Go, 3);").links, 0);
+  assert.equal(convNodes("    this.Count = this.Count + 1;").links, 0);
+});

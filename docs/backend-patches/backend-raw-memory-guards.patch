@@ -1,0 +1,231 @@
+diff --git a/editor/bpkit/core.py b/editor/bpkit/core.py
+index c02230b..e56465a 100644
+--- a/editor/bpkit/core.py
++++ b/editor/bpkit/core.py
+@@ -48,6 +48,38 @@ def rd(a, n):
+     return ctypes.string_at(a, n)
+ 
+ 
++class _MBI(ctypes.Structure):
++    _fields_ = [("BaseAddress", ctypes.c_void_p), ("AllocationBase", ctypes.c_void_p), ("AllocationProtect", ctypes.c_ulong),
++                ("PartitionId", ctypes.c_ushort), ("RegionSize", ctypes.c_size_t), ("State", ctypes.c_ulong),
++                ("Protect", ctypes.c_ulong), ("Type", ctypes.c_ulong)]
++
++
++_READ_OK = 0x02 | 0x04 | 0x08 | 0x20 | 0x40 | 0x80  # PAGE_READONLY .. PAGE_EXECUTE_WRITECOPY
++_VQ = None
++
++
++def readable(a, n):
++    """True when [a, a+n) is committed, readable memory of this process. A candidate pointer found by scanning raw
++    bytes can be any number; reading through it unchecked is an access violation that kills the editor."""
++    global _VQ
++    if n <= 0:
++        return True
++    if _VQ is None:
++        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
++        k32.VirtualQuery.argtypes = [ctypes.c_void_p, ctypes.POINTER(_MBI), ctypes.c_size_t]
++        k32.VirtualQuery.restype = ctypes.c_size_t
++        _VQ = k32.VirtualQuery
++    end, cur = a + n, a
++    while cur < end:
++        m = _MBI()
++        if not _VQ(ctypes.c_void_p(cur), ctypes.byref(m), ctypes.sizeof(m)):
++            return False
++        if m.State != 0x1000 or not (m.Protect & _READ_OK) or (m.Protect & 0x100):  # MEM_COMMIT, readable, not PAGE_GUARD
++            return False
++        cur = (m.BaseAddress or 0) + m.RegionSize
++    return True
++
++
+ def pth(o):
+     return str(o).split("'")[1]
+ 
+@@ -104,6 +136,8 @@ def nodes_array(g, node_addrs, n=None):
+             continue
+         if n is None and c > len(node_addrs):
+             continue
++        if not readable(p, 8 * c):
++            continue
+         ptrs = struct.unpack("<%dQ" % c, rd(p, 8 * c))
+         if all(x in node_addrs for x in ptrs):
+             hits.append((o, list(ptrs)))
+@@ -139,43 +173,56 @@ def bpcls(bp):
+ _ARR = {}
+ 
+ 
++def _counted_offsets(obj, n, span):
++    """Offsets in [0x28, span) of obj holding a TArray header with count n whose buffer is readable."""
++    b = rd(addr(obj), span + 16)
++    hits = []
++    for o in range(0x28, span, 8):
++        p, c, m = struct.unpack_from("<Qii", b, o)
++        if c == n and m >= c and 0x10000 < p < 0x7fffffffffff and readable(p, 8):
++            hits.append(o)
++    return hits
++
++
++def _probe_offset(make, counts, span, what):
++    """The one offset where a probe of every count in `counts` shows that count. A single probe can match a stray
++    triple (another array of the same size, or bytes past the end of the object); a second size rules those out."""
++    common = None
++    for n in counts:
++        hits = set(_counted_offsets(make(n), n, span))
++        common = hits if common is None else common & hits
++        if len(common) == 1:
++            return common.pop()
++        if not common:
++            break
++    raise RuntimeError("%s offset ambiguous %s" % (what, sorted(common or [])))
++
++
+ def find_vars_off(bp):
+     k = (bp.get_class().get_name(), "NewVariables")
+     if k in _ARR:
+         return _ARR[k]
+-    n = 23
+-    ls = "".join('      NewVariables(%d)=(VarName="P%d",VarGuid=%s,VarType=(PinCategory="int"))\n' % (i, i, "%032X" % (i + 1)) for i in range(n))
+-    ib = carry('   Begin Object Class=%s Name="@@NAME@@"\n%s   End Object' % (bpcls(bp), ls), "BkProbe", unreal.Blueprint)
+-    b = rd(addr(ib), 0x600)
+-    hits = []
+-    for o in range(0x28, 0x5f0, 8):
+-        p, c, m = struct.unpack_from("<Qii", b, o)
+-        if c == n and m >= c and 0x10000 < p < 0x7fffffffffff:
+-            hits.append(o)
+-    if len(hits) != 1:
+-        raise RuntimeError("NewVariables offset ambiguous %s" % hits)
+-    _ARR[k] = hits[0]
+-    return hits[0]
++
++    def make(n):
++        ls = "".join('      NewVariables(%d)=(VarName="P%d",VarGuid=%s,VarType=(PinCategory="int"))\n' % (i, i, "%032X" % (i + 1)) for i in range(n))
++        return carry('   Begin Object Class=%s Name="@@NAME@@"\n%s   End Object' % (bpcls(bp), ls), "BkProbe", unreal.Blueprint)
++    off = _probe_offset(make, (23, 37), 0x5f0, "NewVariables")
++    _ARR[k] = off
++    return off
+ 
+ 
+ def bp_arr_off(bp, prop, elem, inner=""):
+-    """Offset of a Blueprint TArray property, found by importing 29 copies of `elem` and looking for count 29."""
++    """Offset of a Blueprint TArray property, found by importing copies of `elem` (29, then 41 if that is ambiguous)."""
+     k = (bp.get_class().get_name(), prop)
+     if k in _ARR:
+         return _ARR[k]
+-    n = 29
+-    ls = "".join("      %s(%d)=%s\n" % (prop, i, elem) for i in range(n))
+-    ib = carry('   Begin Object Class=%s Name="@@NAME@@"\n%s%s   End Object' % (bpcls(bp), inner, ls), "BkArr", unreal.Blueprint)
+-    b = rd(addr(ib), 0x700)
+-    hits = []
+-    for o in range(0x28, 0x6f0, 8):
+-        p, c, m = struct.unpack_from("<Qii", b, o)
+-        if c == n and m >= c and 0x10000 < p < 0x7fffffffffff:
+-            hits.append(o)
+-    if len(hits) != 1:
+-        raise RuntimeError("%s offset ambiguous %s" % (prop, hits))
+-    _ARR[k] = hits[0]
+-    return hits[0]
++
++    def make(n):
++        ls = "".join("      %s(%d)=%s\n" % (prop, i, elem) for i in range(n))
++        return carry('   Begin Object Class=%s Name="@@NAME@@"\n%s%s   End Object' % (bpcls(bp), inner, ls), "BkArr", unreal.Blueprint)
++    off = _probe_offset(make, (29, 41), 0x6f0, prop)
++    _ARR[k] = off
++    return off
+ 
+ 
+ def array_append(bp, prop, off, inner_text, element_lines, stride=8):
+diff --git a/tests/test_unit.py b/tests/test_unit.py
+index 707697e..3937961 100644
+--- a/tests/test_unit.py
++++ b/tests/test_unit.py
+@@ -2871,5 +2871,90 @@ class NameGuardTests(unittest.TestCase):
+         self.assertEqual(hits, [])
+ 
+ 
++# ---------------------------------------------------------------- raw memory guards (editor side, with a fake `unreal`)
++
++class RawMemoryGuardTests(unittest.TestCase):
++    """The raw TArray scans read through numbers found in object memory; a number that only looks like a pointer
++    must be skipped, not read (an access violation kills the editor), and a stray count match must not make the
++    array offset ambiguous."""
++
++    @classmethod
++    def setUpClass(cls):
++        cls.fake = types.ModuleType("unreal")
++        for n in ("BlueprintEditorLibrary", "EdGraphNode", "Blueprint"):
++            setattr(cls.fake, n, type(n, (), {}))
++        cls.patch = mock.patch.dict(sys.modules, {"unreal": cls.fake})
++        cls.patch.start()
++        sys.modules.pop("bpkit.core", None)
++        import bpkit
++        cls.pkg = bpkit
++        cls.saved = getattr(bpkit, "core", None)
++        cls.core = importlib.import_module("bpkit.core")
++
++    @classmethod
++    def tearDownClass(cls):
++        cls.patch.stop()
++        sys.modules.pop("bpkit.core", None)
++        if cls.saved is not None:
++            cls.pkg.core = cls.saved
++        elif hasattr(cls.pkg, "core"):
++            delattr(cls.pkg, "core")
++
++    @unittest.skipUnless(sys.platform == "win32", "VirtualQuery is Windows-only")
++    def test_readable_tells_live_memory_from_a_fake_pointer(self):
++        import ctypes
++        buf = ctypes.create_string_buffer(64)
++        self.assertTrue(self.core.readable(ctypes.addressof(buf), 64))
++        k32 = ctypes.WinDLL("kernel32")
++        k32.VirtualAlloc.restype = ctypes.c_void_p
++        k32.VirtualAlloc.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_ulong, ctypes.c_ulong]
++        k32.VirtualFree.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_ulong]
++        reserved = k32.VirtualAlloc(None, 0x10000, 0x2000, 0x01)  # MEM_RESERVE, PAGE_NOACCESS: mapped but unreadable
++        try:
++            self.assertFalse(self.core.readable(reserved, 8))
++        finally:
++            k32.VirtualFree(reserved, 0, 0x8000)
++
++    @unittest.skipUnless(sys.platform == "win32", "VirtualQuery is Windows-only")
++    def test_nodes_array_skips_a_triple_whose_pointer_is_not_readable(self):
++        import ctypes, struct
++        k32 = ctypes.WinDLL("kernel32")
++        k32.VirtualAlloc.restype = ctypes.c_void_p
++        k32.VirtualAlloc.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_ulong, ctypes.c_ulong]
++        k32.VirtualFree.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_ulong]
++        bad = k32.VirtualAlloc(None, 0x10000, 0x2000, 0x01)
++        try:
++            nodes = (ctypes.c_uint64 * 2)(0x111110, 0x222220)
++            graph = ctypes.create_string_buffer(0x180)
++            struct.pack_into("<Qii", graph, 0x30, bad, 2, 2)                          # looks like a 2-element array
++            struct.pack_into("<Qii", graph, 0x60, ctypes.addressof(nodes), 2, 4)     # the real nodes array
++            with mock.patch.object(self.core, "addr", lambda g: ctypes.addressof(graph)):
++                off, ptrs = self.core.nodes_array(object(), {0x111110, 0x222220})
++            self.assertEqual((off, ptrs), (0x60, [0x111110, 0x222220]))
++        finally:
++            k32.VirtualFree(bad, 0, 0x8000)
++
++    def test_probe_offset_uses_a_second_count_to_rule_out_a_stray_match(self):
++        seen = {23: [448, 1488], 37: [448, 960]}
++        with mock.patch.object(self.core, "_counted_offsets", lambda obj, n, span: seen[obj]):
++            self.assertEqual(self.core._probe_offset(lambda n: n, (23, 37), 0x5f0, "NewVariables"), 448)
++
++    def test_probe_offset_still_raises_when_both_counts_disagree(self):
++        seen = {23: [448, 1488], 37: [960]}
++        with mock.patch.object(self.core, "_counted_offsets", lambda obj, n, span: seen[obj]):
++            with self.assertRaisesRegex(RuntimeError, "NewVariables offset ambiguous"):
++                self.core._probe_offset(lambda n: n, (23, 37), 0x5f0, "NewVariables")
++
++    def test_probe_offset_needs_one_probe_when_the_first_is_unique(self):
++        calls = []
++
++        def make(n):
++            calls.append(n)
++            return n
++        with mock.patch.object(self.core, "_counted_offsets", lambda obj, n, span: [448]):
++            self.assertEqual(self.core._probe_offset(make, (23, 37), 0x5f0, "NewVariables"), 448)
++        self.assertEqual(calls, [23])
++
++
+ if __name__ == "__main__":
+     unittest.main()

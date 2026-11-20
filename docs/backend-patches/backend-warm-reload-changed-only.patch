@@ -1,0 +1,293 @@
+diff --git a/editor/bpkit/warm.py b/editor/bpkit/warm.py
+index 4563f3a..d731251 100644
+--- a/editor/bpkit/warm.py
++++ b/editor/bpkit/warm.py
+@@ -2,8 +2,8 @@
+ 
+ The host (headless.WarmSession) writes a job file like a cold run does (<run>/job.json) and drops a small queue entry
+ <warm dir>/queue/<seq>-<id>.json = {"id", "job", "run"}. This loop takes entries in name order. Before every job it
+-rescans the mod folder and reloads the mod's loaded packages from disk (the host may have rolled files back, or
+-staging_sync may have replaced them since the last job), then runs the job through the same dispatcher a cold process
++rescans the mod folder and reloads the mod's loaded packages whose files changed since the last job (the host may have
++rolled files back, or staging_sync/staging_refresh may have replaced them), plus any modified in memory, then runs the job through the same dispatcher a cold process
+ uses (jobs.COMMANDLET_OPS), writes <run>/result.json and finally <run>/warm.done. The queue entry is deleted last.
+ 
+ The log is shared by all jobs of the session; the loop brackets each job with ABFMCP_WARM_BEGIN/END <id> lines so the host
+@@ -62,19 +62,73 @@ def call_problem(what, res):
+     return None
+ 
+ 
+-def reload_mod(mod, stage_dir):
+-    """Rescan /<Mod> and reload every loaded package under it from disk; unload loaded packages whose file is gone.
+-    Scratch packages (/<Mod>/_McpTmp, never saved) are left alone. Returns a small report (also logged)."""
++# package name -> (mtime_ns, size) of its file the last time this session's copy of the package was known to match it (after a
++# job, for every loaded package that was not modified in memory). A package whose file still has that stat is not reloaded.
++_SYNCED = {}
++
++
++def _file_stat(f):
++    try:
++        st = os.stat(f)
++    except OSError:
++        return None
++    return (st.st_mtime_ns, st.st_size)
++
++
++def _mod_packages(mod):
+     root = "/" + mod
+-    reg = unreal.AssetRegistryHelpers.get_asset_registry()
+-    reg.scan_paths_synchronous([root], True)
+     names = []
+     for a in unreal.EditorAssetLibrary.list_assets(root, recursive=True, include_folder=False):
+         p = str(a).split(".")[0]
+         if "/_McpTmp/" in p or p in names:
+             continue
+         names.append(p)
+-    reload_pkgs, gone_pkgs = [], []
++    return names
++
++
++def _dirty_names():
++    return {p.get_name() for p in unreal.EditorLoadingAndSavingUtils.get_dirty_content_packages()}
++
++
++def _loaded_referencers(root, pkgs, mod_names):
++    """Loaded packages of the mod (`mod_names`) that reference any of `pkgs`, hard or soft, per the asset registry, transitively."""
++    if not pkgs:
++        return []
++    reg = unreal.AssetRegistryHelpers.get_asset_registry()
++    opts = unreal.AssetRegistryDependencyOptions(include_soft_package_references=True, include_hard_package_references=True)
++    seen, found, frontier = set(pkgs), [], list(pkgs)
++    while frontier:
++        following = []
++        for p in frontier:
++            try:
++                refs = reg.get_referencers(p, opts)
++            except Exception:
++                continue
++            for r in refs or []:
++                n = str(r)
++                if n in seen or not n.startswith(root + "/") or n not in mod_names:
++                    continue
++                seen.add(n)
++                if unreal.find_package(n) is None:
++                    continue
++                found.append(n)
++                following.append(n)
++        frontier = following
++    return found
++
++
++def reload_mod(mod, stage_dir):
++    """Rescan /<Mod> and reload from disk every loaded package under it whose file changed since this session last matched it
++    (or that is modified in memory, or that the session never matched); unload loaded packages whose file is gone. Reloading
++    every loaded package before each job made each job slower than the last as reads loaded more packages, and re-saved
++    sounds rebuilt their audio data on every reload (a read went from 25 s to 100 s). Scratch packages (/<Mod>/_McpTmp,
++    never saved) are left alone. Returns a small report (also logged)."""
++    root = "/" + mod
++    reg = unreal.AssetRegistryHelpers.get_asset_registry()
++    reg.scan_paths_synchronous([root], True)
++    names = _mod_packages(mod)
++    dirty = _dirty_names()
++    reload_pkgs, gone_pkgs, kept = [], [], 0
+     for name in names:
+         pkg = unreal.find_package(name)
+         if pkg is None:
+@@ -82,9 +136,24 @@ def reload_mod(mod, stage_dir):
+         f = _package_file(stage_dir, mod, name)
+         if f is not None and not os.path.isfile(f):
+             gone_pkgs.append(pkg)
+-        else:
+-            reload_pkgs.append(pkg)
+-    report = {"reloaded": len(reload_pkgs), "unloaded": len(gone_pkgs)}
++            _SYNCED.pop(name, None)
++            continue
++        if f is not None and name not in dirty and _SYNCED.get(name) is not None and _SYNCED[name] == _file_stat(f):
++            kept += 1
++            continue
++        reload_pkgs.append(pkg)
++    # a loaded package that references a reloaded one (directly or through another) is reloaded with it, as before, so it is
++    # rebuilt against the new classes instead of keeping pins of the replaced ones
++    chosen = {p.get_name() for p in reload_pkgs}
++    gone = {p.get_name() for p in gone_pkgs}
++    for name in _loaded_referencers(root, sorted(chosen | gone), set(names)):
++        if name not in chosen and name not in gone:
++            pkg = unreal.find_package(name)
++            if pkg is not None:
++                chosen.add(name)
++                reload_pkgs.append(pkg)
++                kept -= 1
++    report = {"reloaded": len(reload_pkgs), "unloaded": len(gone_pkgs), "unchanged": kept}
+     problems = []
+     if gone_pkgs:
+         res = unreal.EditorLoadingAndSavingUtils.unload_packages(gone_pkgs)
+@@ -96,10 +165,29 @@ def reload_mod(mod, stage_dir):
+         problems.append(call_problem("reload_packages", res))
+     problems = [p for p in problems if p]
+     if problems:
++        _SYNCED.clear()
+         report["problems"] = problems
+     return report
+ 
+ 
++def remember_synced(mod, stage_dir):
++    """After a job that finished: every loaded package of the mod that is not modified in memory matches its file now (it was
++    loaded or reloaded from it, or the job saved it). Their stats let the next job skip their reload."""
++    if not stage_dir:
++        return
++    dirty = _dirty_names()
++    for name in _mod_packages(mod):
++        if name in dirty or unreal.find_package(name) is None:
++            _SYNCED.pop(name, None)
++            continue
++        f = _package_file(stage_dir, mod, name)
++        st = _file_stat(f) if f is not None else None
++        if st is None:
++            _SYNCED.pop(name, None)
++        else:
++            _SYNCED[name] = st
++
++
+ def run_entry(entry, stage_dir):
+     run = entry["run"]
+     jid = entry["id"]
+@@ -121,10 +209,17 @@ def run_entry(entry, stage_dir):
+             # stops the session and runs the job cold
+             raise ReloadFailed("; ".join(report["problems"]))
+         core.configure("/%s/_McpTmp" % job["mod"], run)
+-        jobs.write_result(run, True, jobs.COMMANDLET_OPS[op](job), None)
++        result = jobs.COMMANDLET_OPS[op](job)
++        try:
++            remember_synced(job["mod"], stage_dir)       # before warm.done: the host may change files once it sees that
++        except Exception:
++            _SYNCED.clear()
++        jobs.write_result(run, True, result, None)
+     except ReloadFailed as e:
++        _SYNCED.clear()
+         jobs.write_result(run, False, None, "%s: %s" % (RELOAD_FAILED, e))
+     except Exception:
++        _SYNCED.clear()                                   # a failed job may leave packages half changed: reload them all next time
+         jobs.write_result(run, False, None, traceback.format_exc())
+     unreal.log("ABFMCP_WARM_END %s" % jid)
+     _write_json(os.path.join(run, "warm.done"), {"id": jid, "time": time.time()})
+diff --git a/tests/test_unit.py b/tests/test_unit.py
+index 4cb5e75..2f93726 100644
+--- a/tests/test_unit.py
++++ b/tests/test_unit.py
+@@ -2977,5 +2977,116 @@ class RawMemoryGuardTests(unittest.TestCase):
+         self.assertEqual(calls, [23])
+ 
+ 
++# ---------------------------------------------------------------- warm session reload (editor side, with a fake `unreal`)
++
++class WarmReloadTests(unittest.TestCase):
++    """Before each job the warm loop reloads only the mod packages whose files changed since it last matched them (and what
++    references them, and anything modified in memory), not every loaded package."""
++
++    def setUp(self):
++        self.tmp = Path(tempfile.mkdtemp())
++        self.stage = self.tmp / "stage"
++        (self.stage / "Content").mkdir(parents=True)
++        self.loaded = {}
++        self.dirty = set()
++        self.refs = {}            # package -> its referencers
++        self.reloads = []
++        test = self
++
++        class Pkg:
++            def __init__(self, name):
++                self.name = name
++
++            def get_name(self):
++                return self.name
++
++        class Reg:
++            def scan_paths_synchronous(self, paths, force):
++                pass
++
++            def get_referencers(self, name, opts):
++                return list(test.refs.get(name, []))
++
++        fake = types.ModuleType("unreal")
++        fake.AssetRegistryHelpers = types.SimpleNamespace(get_asset_registry=lambda: Reg())
++        fake.AssetRegistryDependencyOptions = lambda **kw: kw
++        fake.EditorAssetLibrary = types.SimpleNamespace(
++            list_assets=lambda root, recursive=True, include_folder=False: ["%s.%s" % (n, n.rsplit("/", 1)[-1]) for n in sorted(test.loaded)])
++        fake.find_package = lambda n: test.loaded.get(n)
++        fake.EditorLoadingAndSavingUtils = types.SimpleNamespace(
++            get_dirty_content_packages=lambda: [test.loaded[n] for n in sorted(test.dirty) if n in test.loaded],
++            reload_packages=lambda pkgs, mode: test.reloads.append(sorted(p.get_name() for p in pkgs)) or True,
++            unload_packages=lambda pkgs: True)
++        fake.ReloadPackagesInteractionMode = types.SimpleNamespace(ASSUME_POSITIVE=1)
++        fake.log = fake.log_error = lambda *a: None
++        self.Pkg = Pkg
++        stub = types.ModuleType("stub")
++        self.patch = mock.patch.dict(sys.modules, {"unreal": fake, "bpkit.core": stub, "bpkit.jobs": stub})
++        self.patch.start()
++        import bpkit
++        self.pkg = bpkit
++        self.saved = {k: getattr(bpkit, k) for k in ("core", "jobs", "warm") if hasattr(bpkit, k)}
++        bpkit.core = bpkit.jobs = stub
++        sys.modules.pop("bpkit.warm", None)
++        self.warm = importlib.import_module("bpkit.warm")
++        for n in ("A", "B", "C"):
++            self.add(n)
++
++    def tearDown(self):
++        self.patch.stop()
++        sys.modules.pop("bpkit.warm", None)
++        for k in ("core", "jobs", "warm"):
++            if k in self.saved:
++                setattr(self.pkg, k, self.saved[k])
++            elif hasattr(self.pkg, k):
++                delattr(self.pkg, k)
++        shutil.rmtree(self.tmp, ignore_errors=True)
++
++    def add(self, n, data=b"v1"):
++        (self.stage / "Content" / (n + ".uasset")).write_bytes(data)
++        self.loaded["/M/" + n] = self.Pkg("/M/" + n)
++
++    def touch(self, n, data):
++        f = self.stage / "Content" / (n + ".uasset")
++        f.write_bytes(data)
++        st = f.stat()
++        os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
++
++    def job(self):
++        r = self.warm.reload_mod("M", str(self.stage))
++        self.warm.remember_synced("M", str(self.stage))
++        return r
++
++    def test_only_changed_packages_and_their_referencers_are_reloaded(self):
++        self.job()
++        self.assertEqual(self.reloads, [["/M/A", "/M/B", "/M/C"]])       # a new session matched nothing yet
++        r = self.job()
++        self.assertEqual(len(self.reloads), 1, "nothing changed: nothing is reloaded")
++        self.assertEqual(r["unchanged"], 3)
++        self.refs["/M/A"] = ["/M/B"]
++        self.touch("A", b"v2 longer")
++        self.job()
++        self.assertEqual(self.reloads[-1], ["/M/A", "/M/B"])             # B references A: rebuilt with it
++        self.dirty.add("/M/C")
++        self.job()
++        self.assertEqual(self.reloads[-1], ["/M/C"])                     # modified in memory
++        self.dirty.clear()
++        self.job()
++        self.assertEqual(len(self.reloads), 4)
++
++    def test_a_package_loaded_by_a_job_is_matched_after_it(self):
++        self.job()
++        self.add("D")                                                     # loaded during a job
++        self.warm.remember_synced("M", str(self.stage))
++        self.job()
++        self.assertEqual(len(self.reloads), 1)
++
++    def test_a_failed_reload_forgets_every_match(self):
++        self.job()
++        self.warm._SYNCED.clear()
++        self.job()
++        self.assertEqual(self.reloads[-1], ["/M/A", "/M/B", "/M/C"])
++
++
+ if __name__ == "__main__":
+     unittest.main()

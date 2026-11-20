@@ -36,7 +36,7 @@ export { matchOrphans, movedClassDiagnostics, movedDiagnostic, pairReason } from
 export type { OrphanMatch } from "./ownership/moved.js";
 export { parentOps, planAssetOps, sameClassPath } from "./plan/assetops.js";
 export type { AssetOpCaps, AssetOpsPlan, ParentPlan, PlannedAssetOp } from "./plan/assetops.js";
-export { deleteSourceMap, mapCompileMessages, readSourceMap, sourceMapPath, writeSourceMap } from "./ownership/sourcemap.js";
+export { deleteSourceMap, mapCompileMessages, orderCompileDiagnostics, readSourceMap, sourceMapPath, writeSourceMap } from "./ownership/sourcemap.js";
 export type { CompileMessageLike, SourceMapFile } from "./ownership/sourcemap.js";
 export { assetsNeedingRead, planBuild } from "./plan/planner.js";
 export type { PlanInput, PlanResult } from "./plan/planner.js";

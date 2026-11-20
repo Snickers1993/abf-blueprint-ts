@@ -1,7 +1,7 @@
 // stubs.lock.json: which editor build the stubs were generated for (design 5.3).
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { profileForBuild } from "@abfc/env";
+import { profileForBuild, sameEditorBuild } from "@abfc/env";
 import type { Environment, ProjectConfig } from "@abfc/env";
 import type { Diagnostic } from "@abfc/ir";
 import { STUBGEN_VERSION } from "./manual.js";
@@ -111,7 +111,7 @@ export function checkLock(lock: StubsLock | null, env: Environment, config: Proj
       fix: 'run "abfc generate" to regenerate.',
     });
   }
-  if (env.fingerprint !== null && lock.editorFingerprint !== env.fingerprint) {
+  if (!sameEditorBuild(env, lock.editorFingerprint)) {
     out.push({
       severity: mode === "build" ? "error" : "warning",
       code: "ABFC3001",

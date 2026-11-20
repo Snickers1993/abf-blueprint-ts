@@ -209,10 +209,39 @@ export async function readAsset(ctx: CliContext, backend: Backend, asset: string
     const hit = cache.get(key);
     if (hit !== null) return { text: hit, parsed: parseExport(hit) };
   }
+  // An editor read takes tens of seconds on a large mod: each one is shown and timed in runs.jsonl (`read.editor`, `asset`) as it ends,
+  // so a long run of reads after a re-sync is not silent.
+  const t0 = performance.now();
+  const miss = cache?.missed.at(-1);
   const snap = await backend.read(ctx.config.mod.name, asset);
   const text = ctx.deps.host.readFile(snap.exportPath);
   if (cache !== undefined && key !== null) cache.put(key, text);
+  const seconds = (performance.now() - t0) / 1000;
+  const prefix = `/${ctx.config.mod.name}/`;
+  const shortOf = (p: string): string => (p.toLowerCase().startsWith(prefix.toLowerCase()) ? p.slice(prefix.length) : p);
+  const why = miss === undefined || miss.asset !== asset ? "" : miss.reason === "dep" && miss.dep !== undefined ? ` (${shortOf(miss.dep)} changed)` : ` (${missLabel(miss.reason)})`;
+  editorReads.set(ctx, (editorReads.get(ctx) ?? 0) + 1);
+  // a cold read starts a hidden editor for the one asset (about 50-100 s on a big mod); a warm one reuses the running session
+  const mode = backend.lastWarm === true ? "warm" : "cold";
+  if (mode === "cold" && backend.warmStartError != null && !warmErrorShown.has(ctx)) {
+    warmErrorShown.add(ctx);
+    ctx.output.info(`  the warm editor did not start (${backend.warmStartError}): every editor step of this run starts its own editor`, "warn");
+  }
+  ctx.output.info(`  read ${shortOf(asset)} from the editor in ${seconds.toFixed(1)} s, ${mode}${why} [${editorReads.get(ctx)}]`, "dim");
+  try {
+    recordRun(ctx.paths.runsFile, { at: new Date().toISOString(), step: "read.editor", seconds, ok: true, mode, asset });
+  } catch {
+    // timings only
+  }
   return { text, parsed: parseExport(text) };
+}
+
+/** Editor reads of this run, for the running count on each read line. */
+const warmErrorShown = new WeakSet<CliContext>();
+const editorReads = new WeakMap<CliContext, number>();
+
+function missLabel(reason: string): string {
+  return reason === "files" ? "own files changed" : reason === "new" ? "not read before" : reason === "backend" ? "read with another backend before" : reason === "text" ? "cached text gone" : "no cache";
 }
 
 export const shortHash = (h: string | null): string => (h === null || h === "" ? "-" : h.replace(/^sha256:/, "").slice(0, 8));
@@ -251,13 +280,30 @@ export function unitsHeldByStage<U extends ManifestUnit>(units: readonly U[], st
  * The read cache of a staging copy (null when the stage path is unknown). Its identity is the backend and editor; reads cached by
  * versions that also keyed on the stub lock are accepted and moved over.
  */
+/** Backend capabilities that say nothing about bp_read output (kept out of the read cache identity). */
+export const READ_NEUTRAL_CAPS: readonly string[] = ["stageRefresh"];
+
 export function readCacheFor(ctx: CliContext, info: BackendInfo, stagingPath: string): ReadCache | null {
   if (stagingPath === "") return null;
   const profile = ctx.env.profile;
-  const base = { server: info.serverVersion, engine: info.engineVersion, ext: info.extensions, caps: info.capabilities };
-  return new ReadCache(ctx.paths.cacheDir, stagingPath, ctx.config.mod.name, readCacheIdentity({ ...base, profile: profile.id }), [
-    readCacheIdentity({ ...base, stubs: stubLockHashOf(readLock(win32.join(ctx.paths.stubsDir, profile.id))), profile: profile.id }),
-  ]);
+  // Capabilities that do not change what bp_read returns stay out of the identity: a backend patch that only adds such a tool
+  // (staging_refresh) must not send every read back to the editor. List any new capability of that kind here.
+  const caps: Record<string, unknown> = { ...info.capabilities };
+  for (const k of READ_NEUTRAL_CAPS) delete caps[k];
+  const base = { server: info.serverVersion, engine: info.engineVersion, ext: info.extensions, caps };
+  const classOnly = new Set((ctx.config.stubs.classOnly ?? []).map((a) => a.toLowerCase()));
+  return new ReadCache(
+    ctx.paths.cacheDir,
+    stagingPath,
+    ctx.config.mod.name,
+    readCacheIdentity({ ...base, profile: profile.id }),
+    [
+      readCacheIdentity({ ...base, stubs: stubLockHashOf(readLock(win32.join(ctx.paths.stubsDir, profile.id))), profile: profile.id }),
+      // abfc 5951218..ca7cda3 kept stageRefresh in the identity: those reads are just as valid
+      readCacheIdentity({ ...base, caps: info.capabilities, profile: profile.id }),
+    ],
+    classOnly,
+  );
 }
 
 /**
@@ -301,6 +347,8 @@ export async function pruneManifestsToStage(
     appliedAssets?: readonly string[];
     ir?: IrModule;
     owned?: readonly IrAsset[];
+    /** Only these assets (lowercase paths): the ones a refresh took from the real mod. */
+    only?: ReadonlySet<string>;
   } = {},
 ): Promise<void> {
   const { projectDir } = ctx;
@@ -309,6 +357,7 @@ export async function pruneManifestsToStage(
   const assets = new Set(appliedAssets);
   for (const m of listManifests(projectDir)) if (m.asset.startsWith(`/${mod}/`)) assets.add(m.asset);
   for (const asset of assets) {
+    if (o.only !== undefined && !o.only.has(asset.toLowerCase())) continue;
     try {
       const current = readManifest(projectDir, asset);
       const base = o.base?.get(asset) ?? current;

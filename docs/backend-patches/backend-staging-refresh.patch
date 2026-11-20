@@ -1,0 +1,122 @@
+diff --git a/headless_tools.py b/headless_tools.py
+index 6a689ee..2f8e6dd 100644
+--- a/headless_tools.py
++++ b/headless_tools.py
+@@ -344,6 +344,13 @@ def build(run_json, remote_errors, t3d_errors, kit_root, forbidden, py_status, l
+         return _out({"mod": stage.name, "files": stage.file_count, "staging_path": str(stage.dir),
+                      "message": "Staged %s. bp_apply and the other tools work on this copy; bp_publish copies the result back." % stage.name})
+ 
++    def t_staging_refresh(args):
++        headless.WARMS.stop_all()      # a warm editor holds the staged packages open and would not see the copied files
++        r = staging.refresh(args["mod"])
++        n = len(r["copied"]) + len(r["removed"])
++        return _out({"mod": args["mod"], "copied": r["copied"], "removed": r["removed"],
++                     "message": "Refreshed %d file(s) of the staged %s from the real mod; the staged edits were kept." % (n, args["mod"])})
++
+     def t_staging_status(args):
+         stage = staging.load(args["mod"])
+         meta = stage.meta()
+@@ -774,6 +781,10 @@ def build(run_json, remote_errors, t3d_errors, kit_root, forbidden, py_status, l
+          "Copy a mod project folder (the one holding the .uplugin) into a private staging area. Every headless tool works on that copy; "
+          "nothing in the real mod changes until bp_publish. Refuses when staging holds unpublished changes unless discard_changes.",
+          dict(mod_dir=STR, discard_changes=BOOL), ["mod_dir"]),
++        ("staging_refresh", t_staging_refresh,
++         "Copy into the staged mod only what the real mod changed since staging_sync (files the stage never touched that were saved or "
++         "deleted in the real mod, and new real files), keeping the staged edits. Refuses on a conflict (a file changed on both sides).",
++         dict(mod=STR), ["mod"]),
+         ("staging_status", t_staging_status,
+          "What differs between the staged copy and its baseline (changed, added, removed files), conflicts with the real mod, last sync time.",
+          dict(mod=STR), ["mod"]),
+diff --git a/staging.py b/staging.py
+index 6a77ac8..d549773 100644
+--- a/staging.py
++++ b/staging.py
+@@ -181,6 +181,50 @@ def sync(mod_dir, discard_changes=False, forbidden=()):
+     return stage
+ 
+ 
++def refresh(mod):
++    """Brings an existing stage up to the real mod without discarding it: copies the files the stage never touched that the real
++    mod saved since the sync (diff()'s stale list), removes the ones it deleted, and copies real files the stage never had.
++    Files the stage changed or added (unpublished work) are kept. Refuses on a conflict (a file changed on both sides): that
++    needs staging_sync with discard_changes. The sync time stays: the stage still holds the work it held."""
++    stage = load(mod)
++    meta = _upgrade_baseline(stage, stage.meta())
++    if not meta.get("source_dir"):
++        raise StagingError("the stage of %s does not record its real mod folder: run staging_sync" % mod)
++    src = Path(meta["source_dir"])
++    if not src.is_dir():
++        raise StagingError("the real mod folder %s is gone: run staging_sync" % src)
++    d = diff(stage)
++    if d["conflicts"]:
++        raise StagingError("staging of %s conflicts with the real mod (%s): run staging_sync with discard_changes"
++                           % (mod, ", ".join(c["path"] for c in d["conflicts"][:5])))
++    base = meta.setdefault("baseline", {})
++    known = set(_tracked_files(stage.dir)) | set(base)
++    copied, removed = [], []
++    for rel in d["stale"]:
++        real, dst = src / rel, stage.dir / rel
++        if real.is_file():
++            dst.parent.mkdir(parents=True, exist_ok=True)
++            shutil.copyfile(real, dst)
++            base[rel] = {"sha256": _sha(dst), "size": dst.stat().st_size}
++            copied.append(rel)
++        else:
++            if dst.exists():
++                dst.unlink()
++            base.pop(rel, None)
++            removed.append(rel)
++    for rel in _tracked_files(src):
++        if rel in known:
++            continue
++        dst = stage.dir / rel
++        dst.parent.mkdir(parents=True, exist_ok=True)
++        shutil.copyfile(src / rel, dst)
++        base[rel] = {"sha256": _sha(dst), "size": dst.stat().st_size}
++        copied.append(rel)
++    meta["refreshed_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
++    stage.save_meta(meta)
++    return {"copied": sorted(copied), "removed": sorted(removed)}
++
++
+ def load(mod):
+     stage = Stage(mod)
+     if not stage.meta_path.is_file() or not stage.dir.is_dir():
+diff --git a/tests/test_unit.py b/tests/test_unit.py
+index 35d1771..45f6735 100644
+--- a/tests/test_unit.py
++++ b/tests/test_unit.py
+@@ -1062,6 +1062,33 @@ class StagingTests(unittest.TestCase):
+         self.assertEqual(d["stale"], ["Content/Sub/B.uasset"])
+         self.assertEqual([c["path"] for c in d["conflicts"]], ["Content/A.uasset"])
+ 
++    def test_refresh_copies_only_what_the_real_mod_changed_and_keeps_staged_edits(self):
++        self.stage_write("Content/Sub/B.uasset", b"staged edit")              # unpublished work in the stage
++        (self.real / "Content" / "A.uasset").write_bytes(b"saved in the Mod Editor")
++        (self.real / "Content" / "M_New.uasset").write_bytes(b"new material")
++        synced = self.stage.meta()["synced_at"]
++        r = staging.refresh("Fake")
++        self.assertEqual(r, {"copied": ["Content/A.uasset", "Content/M_New.uasset"], "removed": []})
++        self.assertEqual((self.stage.dir / "Content" / "A.uasset").read_bytes(), b"saved in the Mod Editor")
++        self.assertEqual((self.stage.dir / "Content" / "M_New.uasset").read_bytes(), b"new material")
++        self.assertEqual((self.stage.dir / "Content" / "Sub" / "B.uasset").read_bytes(), b"staged edit")
++        d = staging.diff(self.stage)
++        self.assertEqual((d["stale"], d["conflicts"], d["changed"], d["added"]), ([], [], ["Content/Sub/B.uasset"], []))
++        self.assertEqual(self.stage.meta()["synced_at"], synced)
++        # a file deleted in the real mod goes from the stage too
++        (self.real / "Content" / "A.uasset").unlink()
++        self.assertEqual(staging.refresh("Fake"), {"copied": [], "removed": ["Content/A.uasset"]})
++        self.assertFalse((self.stage.dir / "Content" / "A.uasset").exists())
++        self.assertEqual(staging.diff(self.stage)["removed"], [])
++
++    def test_refresh_refuses_a_conflict(self):
++        self.stage_write("Content/A.uasset", b"staged edit")
++        (self.real / "Content" / "A.uasset").write_bytes(b"saved in the Mod Editor")
++        with self.assertRaises(staging.StagingError) as cm:
++            staging.refresh("Fake")
++        self.assertIn("conflicts", str(cm.exception))
++        self.assertEqual((self.stage.dir / "Content" / "A.uasset").read_bytes(), b"staged edit")
++
+     def test_nothing_stale_when_the_real_mod_is_unchanged(self):
+         self.assertEqual(staging.diff(self.stage)["stale"], [])
+ 

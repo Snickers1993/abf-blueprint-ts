@@ -1280,6 +1280,125 @@ test("(S40) after a re-sync the build reads only assets whose files changed sinc
   });
 });
 
+test("(S40b) with staging_refresh a Mod Editor save is copied alone: files abfc does not build, an owned Blueprint (also on a conflict) get no re-sync", async () => {
+  await withRig({ handMadeEvent: false, stageRefresh: true }, async (r) => {
+    writeFileSync(join(r.dir, "src", "Tally.ts"), tally("BP_Tally").replace("Total!: int;", "Total: int = 5;"), "utf8");
+    let x = await r.run(["build"]);
+    assert.equal(x.code, 0, x.out);
+    r.backend.markPublished();
+    const count = (tool: string): number => r.backend.calls.filter((c) => c.tool === tool).length;
+    const syncs = count("staging_sync");
+    let reads = count("bp_read");
+    const pending = join(r.dir, ".abfc", "stage-refreshed.json");
+
+    // The Mod Editor saved a material and a room bake: only those come over, the stage and its work stay.
+    r.backend.stageStale = ["Content/Rooms/M_SomeMaterial.uasset", "Content/Rooms/BP_RoomBake.uasset"];
+    x = await r.run(["build"]);
+    assert.equal(x.code, 0, x.out);
+    assert.doesNotMatch(x.out, /ABFC4017/, x.out);
+    assert.match(x.out, /Mod Editor saved 2 file\(s\) .*copied 2 file\(s\) into the staged copy/, x.out);
+    assert.doesNotMatch(x.out, /changed since the staged copy was made/, x.out);
+    assert.equal(count("staging_refresh"), 1);
+    assert.equal(count("staging_sync"), syncs, "no full re-sync");
+    assert.equal(count("bp_read"), reads, "nothing is read from the editor");
+    assert.equal(existsSync(pending), false, "a successful build leaves nothing pending");
+
+    // The Mod Editor saved an owned Blueprint (a hand-made variable): just that file comes over, the TypeScript goes on top again.
+    r.backend.addRealModVariable(TA, "HandMade", "bool");
+    r.backend.stageStale = ["Content/BP_Tally.uasset"];
+    let before = appliedSpecs(r).length;
+    x = await r.run(["build"]);
+    assert.equal(x.code, 0, x.out);
+    assert.doesNotMatch(x.out, /ABFC4017/, x.out);
+    assert.match(x.out, /applied on top of 1 owned asset/, x.out);
+    assert.equal(count("staging_refresh"), 2);
+    assert.equal(count("staging_sync"), syncs, "no full re-sync for an owned asset either");
+    const readNow = r.backend.calls.filter((c) => c.tool === "bp_read").slice(reads);
+    assert.ok(readNow.length > 0 && readNow.every((c) => c.asset === TA), `only the saved asset is read: ${readNow.map((c) => c.asset).join(", ")}`);
+    // the Mod Editor's copy is in the stage, and the TypeScript wins over it as after a re-sync
+    assert.match(x.out, /removed the hand-made variable HandMade/, x.out);
+    const tallySpecs = appliedSpecs(r).slice(before).filter((sp) => sp.asset === TA);
+    assert.ok(tallySpecs.some((sp) => JSON.stringify(sp).includes("Total")), "the own field's default is sent again (TypeScript wins)");
+    reads = count("bp_read");
+
+    // That build's work is not published: another save of a material keeps it (nothing is applied again).
+    r.backend.stageStale = ["Content/Rooms/M_SomeMaterial.uasset"];
+    before = appliedSpecs(r).length;
+    x = await r.run(["build"]);
+    assert.equal(x.code, 0, x.out);
+    assert.match(x.out, /up to date/, x.out);
+    assert.equal(appliedSpecs(r).length, before, "unpublished staged work is kept");
+
+    // An owned Blueprint saved in the Mod Editor while the stage holds unpublished work on it (a conflict): the Mod Editor's file is taken.
+    r.backend.stageConflicts = ["Content/BP_Tally.uasset"];
+    before = appliedSpecs(r).length;
+    x = await r.run(["build"]);
+    assert.equal(x.code, 0, x.out);
+    assert.doesNotMatch(x.out, /ABFC4017/, x.out);
+    assert.equal(r.backend.calls.filter((c) => c.tool === "staging_refresh").at(-1)?.label, "Content/BP_Tally.uasset");
+    assert.equal(count("staging_sync"), syncs);
+    assert.ok(appliedSpecs(r).slice(before).some((sp) => sp.asset === TA), "the TypeScript is applied on top again");
+
+    // A conflict on a file that is not an owned Blueprint still re-syncs the whole stage.
+    r.backend.stageConflicts = ["Config/Tags/TestModTags.ini"];
+    x = await r.run(["build"]);
+    assert.equal(x.code, 0, x.out);
+    assert.match(x.out, /warning ABFC4017/, x.out);
+    assert.equal(count("staging_sync"), syncs + 1);
+  });
+});
+
+test("(S40d) a refresh that an abfc generate made is still applied by the next build", async () => {
+  await withRig({ handMadeEvent: false, stageRefresh: true }, async (r) => {
+    writeFileSync(join(r.dir, "src", "Tally.ts"), tally("BP_Tally").replace("Total!: int;", "Total: int = 5;"), "utf8");
+    let x = await r.run(["build"]);
+    assert.equal(x.code, 0, x.out);
+    r.backend.markPublished();
+    r.backend.addRealModVariable(TA, "HandMade", "bool");
+    r.backend.stageStale = ["Content/BP_Tally.uasset"];
+    // (the fake backend cannot reflect, so generate stops after the stage step)
+    x = await r.run(["generate"]);
+    assert.equal(r.backend.calls.filter((c) => c.tool === "staging_refresh").length, 1, x.out);
+    const pending = join(r.dir, ".abfc", "stage-refreshed.json");
+    assert.ok(existsSync(pending), "the refreshed files wait for a build");
+    const before = appliedSpecs(r).length;
+    x = await r.run(["build"]);
+    assert.equal(x.code, 0, x.out);
+    assert.ok(appliedSpecs(r).slice(before).some((sp) => sp.asset === TA && JSON.stringify(sp).includes("Total")), x.out);
+    assert.equal(existsSync(pending), false);
+  });
+});
+
+test("(S40e) a backend patch that only adds staging_refresh keeps every cached read", async () => {
+  await withRig({ handMadeEvent: false }, async (r) => {
+    writeFileSync(join(r.dir, "src", "Tally.ts"), tally("BP_Tally"), "utf8");
+    let x = await r.run(["build"]);
+    assert.equal(x.code, 0, x.out);
+    r.backend.markPublished();
+    x = await r.run(["build", "--resync"]);
+    assert.equal(x.code, 0, x.out);
+    const reads = r.backend.calls.filter((c) => c.tool === "bp_read").length;
+    r.backend.setStageRefresh(true);
+    x = await r.run(["build", "--resync"]);
+    assert.equal(x.code, 0, x.out);
+    assert.doesNotMatch(x.out, /another backend/, x.out);
+    assert.equal(r.backend.calls.filter((c) => c.tool === "bp_read").length, reads, "the reads come from the cache");
+  });
+});
+
+test("(S40c) a backend without staging_refresh re-syncs as before", async () => {
+  await withRig({ handMadeEvent: false }, async (r) => {
+    let x = await r.run(["build"]);
+    assert.equal(x.code, 0, x.out);
+    r.backend.markPublished();
+    r.backend.stageStale = ["Content/Rooms/M_SomeMaterial.uasset"];
+    x = await r.run(["build"]);
+    assert.equal(x.code, 0, x.out);
+    assert.match(x.out, /warning ABFC4017/, x.out);
+    assert.equal(r.backend.calls.filter((c) => c.tool === "staging_refresh").length, 0);
+  });
+});
+
 const GUN_STUB = [
   "// generated by abfc generate 0.1.0 for test; do not edit, never commit",
   'import type { Actor } from "/Script/FakeEngine";',

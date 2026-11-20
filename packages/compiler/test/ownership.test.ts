@@ -4,12 +4,12 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseExport } from "@abfc/ir";
-import type { Span, T3dNode } from "@abfc/ir";
+import type { Diagnostic, Span, T3dNode } from "@abfc/ir";
 import {
   adoptionDiagnostics, analyzeAdoption, deleteManifest, deleteSourceMap, driftDiagnostics, fingerprintUnit, listManifests, mapCompileMessages, manifestPath, ownedSets,
   readManifest, readSourceMap, rebaseStaleUnits, unitState, writeManifest, writeSourceMap,
 } from "../src/index.js";
-import { builtGraphMatches, engineNormalisedFunction } from "../src/index.js";
+import { builtGraphMatches, engineNormalisedFunction, orderCompileDiagnostics } from "../src/index.js";
 import type { Manifest, ManifestUnit, SourceMapFile } from "../src/index.js";
 
 const BP = "/Fake/Mod/BP_Host.BP_Host";
@@ -558,4 +558,21 @@ test("the struct-rewrite allowance does not hide edits elsewhere in the function
   assert.notEqual(engineNormalisedFunction(recorded, plain), null, "links that already name the replacement are accepted");
   assert.equal(engineNormalisedFunction(recorded, changedDefault), null);
   assert.equal(engineNormalisedFunction(recorded, rewired), null);
+});
+
+test("compile errors: the real errors come first, the 'Could not find a function' echoes fold into one per function", () => {
+  const span = (line: number): Span => ({ file: "src/A.ts", line, col: 1, endLine: line, endCol: 2 });
+  const echo = (fn: string, asset: string, line: number): Diagnostic => ({
+    severity: "error", code: "ABFC6002", message: `[Unreal] Could not find a function named "${fn}" in 'BP_X'.`, asset, span: span(line),
+  });
+  const real: Diagnostic = { severity: "error", code: "ABFC6001", message: "[Unreal] Can't connect pins Ang and Yaw : Convert Integer to Float.", asset: "/M/B", span: span(9) };
+  const out = orderCompileDiagnostics([echo("Tick2", "/M/A", 1), echo("Tick2", "/M/B", 2), echo("Spin", "/M/A", 3), real, echo("Tick2", "/M/A", 4)]);
+  assert.deepEqual(out.map((d) => d.code), ["ABFC6001", "ABFC6002", "ABFC6002"]);
+  assert.equal(out[0], real);
+  assert.match(out[1]!.message, /"Tick2" \(3 calls in 2 assets; most likely an echo of the errors above/);
+  assert.deepEqual(out[1]!.span, span(1));
+  assert.match(out[2]!.message, /"Spin" \(1 call;/);
+  // only echoes (a function that is really missing): unchanged
+  const only = [echo("Spin", "/M/A", 3), echo("Spin", "/M/A", 4)];
+  assert.deepEqual(orderCompileDiagnostics(only), only);
 });

@@ -163,6 +163,8 @@ export class BpApplyBackend implements Backend {
   private warmAvailable = false;
   private warmStarted = false;
   private warmFailed = false;
+  /** Why the warm session did not start (every commandlet operation of this run is cold), or null. */
+  warmStartError: string | null = null;
   /** True when the most recent commandlet operation ran on the warm session. */
   lastWarm = false;
 
@@ -222,6 +224,12 @@ export class BpApplyBackend implements Backend {
       files: num(json.files),
       stagingPath: str(json.staging_path) ?? "",
     };
+  }
+
+  async refreshStage(mod: string, takeMod: readonly string[] = []): Promise<{ copied: string[]; removed: string[] }> {
+    const { json } = await this.call("staging_refresh", takeMod.length > 0 ? { mod, take_mod: [...takeMod] } : { mod });
+    this.warmStarted = false; // like staging_sync, it stops the warm session (the editor would keep the old packages loaded)
+    return { copied: strList(json.copied), removed: strList(json.removed) };
   }
 
   async stageStatus(mod: string): Promise<StageStatus | null> {
@@ -514,8 +522,9 @@ export class BpApplyBackend implements Backend {
     try {
       await this.call("warm_session", { action: "start", mod }, { timeoutMs: 300_000 });
       this.warmStarted = true;
-    } catch {
+    } catch (e) {
       this.warmFailed = true;
+      this.warmStartError = (e instanceof Error ? e.message : String(e)).slice(0, 300);
     }
   }
 

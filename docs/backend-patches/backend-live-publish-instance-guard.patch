@@ -1,0 +1,173 @@
+diff --git a/editor/bpkit/livepublish.py b/editor/bpkit/livepublish.py
+index aebda97..145a92f 100644
+--- a/editor/bpkit/livepublish.py
++++ b/editor/bpkit/livepublish.py
+@@ -95,6 +95,29 @@ def _dependency_order(names):
+     return ordered + rest
+ 
+ 
++# More live instances of the swapped classes than this in the open level: the class swap of a live publish is refused (one
++# publish of 41 classes with about 1,140 preview actors in the level crashed the editor). `max_live_instances` overrides it;
++# 0 means no limit.
++_MAX_LIVE_INSTANCES = 300
++
++
++def _live_instances(pkgs):
++    """Actors in the open level whose class lives in one of `pkgs`: (count, {package: count})."""
++    names, by = set(pkgs), {}
++    try:
++        actors = unreal.get_editor_subsystem(unreal.EditorActorSubsystem).get_all_level_actors()
++    except Exception:
++        return 0, by
++    for a in actors or []:
++        try:
++            p = str(a.get_class().get_path_name()).split(".")[0]
++        except Exception:
++            continue
++        if p in names:
++            by[p] = by.get(p, 0) + 1
++    return sum(by.values()), by
++
++
+ def prepare(args):
+     """Make the given /Mod/... packages safe to overwrite on disk. Refuses (and changes nothing) when Play In Editor is
+     running or when any of them, or any loaded package of the same mod that references them (`referencers`), has unsaved
+@@ -107,6 +130,15 @@ def prepare(args):
+     ued = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem)
+     if ued.get_game_world() is not None:
+         return {"refused": pkgs, "reason": "Play In Editor is running"}
++    limit = args.get("max_live_instances")
++    limit = _MAX_LIVE_INSTANCES if limit is None else int(limit)
++    if limit > 0:
++        n, by = _live_instances(pkgs)
++        if n > limit:
++            top = ", ".join("%s x%d" % (p.rsplit("/", 1)[-1], c) for p, c in sorted(by.items(), key=lambda kv: -kv[1])[:5])
++            return {"refused": sorted(by), "live_instances": n,
++                    "reason": "%d live instances of the published classes are in the open level (%s), more than %d; swapping "
++                              "their classes live can crash the editor" % (n, top, limit)}
+     dirty = {p.get_name() for p in unreal.EditorLoadingAndSavingUtils.get_dirty_content_packages()}
+     hit = [p for p in pkgs if p in dirty]
+     hit_refs = [p for p in refs if p in dirty]
+diff --git a/headless_tools.py b/headless_tools.py
+index 1e1cb0b..7e5f3ef 100644
+--- a/headless_tools.py
++++ b/headless_tools.py
+@@ -223,8 +223,15 @@ class LiveEditor:
+         code = LIVEPUBLISH.read_text(encoding="utf-8") + "\ndef _abf(args):\n    return %s(args)\n" % fn
+         return self.run_json(code, args, timeout=180)
+ 
+-    def prepare(self, packages):
+-        return self._call("prepare", {"root": "/" + self.mod, "packages": packages})
++    def prepare(self, packages, live_limit=True):
++        """live_limit=False: release the files whatever the open level holds (the restore after a failed copy needs them)."""
++        args = {"root": "/" + self.mod, "packages": packages}
++        limit = os.environ.get("ABF_LIVE_PUBLISH_MAX_INSTANCES")
++        if not live_limit:
++            args["max_live_instances"] = 0
++        elif limit not in (None, ""):
++            args["max_live_instances"] = int(limit)
++        return self._call("prepare", args)
+ 
+     def register_tags(self, tags):
+         """Make the open editor know these gameplay tags (in memory only); see livepublish.register_tags."""
+diff --git a/staging.py b/staging.py
+index 3dcf534..c5661c3 100644
+--- a/staging.py
++++ b/staging.py
+@@ -465,6 +465,9 @@ def publish(stage, editor, compile_gate, assets=None, dry_run=False, now=None, d
+                 tail = "Stop Play In Editor, then publish again."
+             elif "unsaved" in reason:
+                 tail = "Save or revert those assets, then publish again."
++            elif "live instances" in reason:
++                tail = ("Remove most of those actors from the open level (for example close the runtime preview), or close the "
++                        "editor and publish again (the copy then needs no live reload); ABF_LIVE_PUBLISH_MAX_INSTANCES changes the limit.")
+             else:
+                 tail = "Close the asset editors of those assets, then publish again."
+             ref_note = ""
+@@ -576,7 +579,7 @@ def publish(stage, editor, compile_gate, assets=None, dry_run=False, now=None, d
+             bad_reload = str(e)
+         if bad_reload:
+             try:
+-                editor.prepare(prep_pkgs)    # the reload re-opened the files; release them so the restore can write
++                editor.prepare(prep_pkgs, live_limit=False)    # the reload re-opened the files; release them so the restore can write
+             except Exception:
+                 pass
+             failed = _restore(src, backup, files + del_existing, existed, manifest)
+diff --git a/tests/test_unit.py b/tests/test_unit.py
+index 357176b..c7a2af9 100644
+--- a/tests/test_unit.py
++++ b/tests/test_unit.py
+@@ -943,7 +943,7 @@ class FakeEditor:
+             raise RuntimeError(self.forget_error)
+         return {"forgotten": [], "still_listed": list(self.still_listed or [])}
+ 
+-    def prepare(self, packages):
++    def prepare(self, packages, live_limit=True):
+         self.calls.append("prepare")
+         self.prepared.append(list(packages))
+         if self.prepare_raises:
+@@ -3107,5 +3107,64 @@ class WarmReloadTests(unittest.TestCase):
+         self.assertEqual(self.reloads[-1], ["/M/A", "/M/B", "/M/C"])
+ 
+ 
++class LivePublishInstanceGuardTests(unittest.TestCase):
++    """A live publish refuses to swap classes that many actors of the open level use (it crashed the editor once)."""
++
++    def setUp(self):
++        self.actors = []
++        test = self
++
++        class Actor:
++            def __init__(self, path):
++                self.path = path
++
++            def get_class(self):
++                return types.SimpleNamespace(get_path_name=lambda: self.path)
++
++        self.Actor = Actor
++        fake = types.ModuleType("unreal")
++        fake.UnrealEditorSubsystem = "ued"
++        fake.EditorActorSubsystem = "actors"
++        subs = {"ued": types.SimpleNamespace(get_game_world=lambda: None),
++                "actors": types.SimpleNamespace(get_all_level_actors=lambda: list(test.actors))}
++        fake.get_editor_subsystem = lambda cls: subs[cls]
++        fake.EditorLoadingAndSavingUtils = types.SimpleNamespace(get_dirty_content_packages=lambda: [])
++        fake.AssetRegistryHelpers = types.SimpleNamespace(get_asset_registry=lambda: types.SimpleNamespace(get_referencers=lambda n, o: []))
++        fake.AssetRegistryDependencyOptions = lambda **kw: kw
++        self.patch = mock.patch.dict(sys.modules, {"unreal": fake})
++        self.patch.start()
++        import bpkit
++        self.pkg = bpkit
++        self.saved = getattr(bpkit, "livepublish", None)
++        sys.modules.pop("bpkit.livepublish", None)
++        self.lp = importlib.import_module("bpkit.livepublish")
++
++    def tearDown(self):
++        self.patch.stop()
++        sys.modules.pop("bpkit.livepublish", None)
++        if self.saved is not None:
++            self.pkg.livepublish = self.saved
++        elif hasattr(self.pkg, "livepublish"):
++            delattr(self.pkg, "livepublish")
++
++    def test_many_live_instances_refuse_before_anything_is_unloaded(self):
++        self.actors = [self.Actor("/M/BP_Desk.BP_Desk_C")] * 250 + [self.Actor("/M/BP_Lamp.BP_Lamp_C")] * 100 + [self.Actor("/Game/X.X_C")] * 900
++        r = self.lp.prepare({"root": "/M", "packages": ["/M/BP_Desk", "/M/BP_Lamp", "/M/BP_Other"]})
++        self.assertEqual(r["live_instances"], 350)
++        self.assertEqual(r["refused"], ["/M/BP_Desk", "/M/BP_Lamp"])
++        self.assertIn("live instances", r["reason"])
++        self.assertIn("BP_Desk x250", r["reason"])
++
++    def test_the_limit_can_be_raised_or_switched_off(self):
++        self.actors = [self.Actor("/M/BP_Desk.BP_Desk_C")] * 350
++        n, by = self.lp._live_instances(["/M/BP_Desk"])
++        self.assertEqual((n, by), (350, {"/M/BP_Desk": 350}))
++        past = types.SimpleNamespace(get_dirty_content_packages=mock.Mock(side_effect=RuntimeError("past the guard")))
++        with mock.patch.object(self.lp.unreal, "EditorLoadingAndSavingUtils", past):
++            for limit in (400, 0):
++                with self.assertRaisesRegex(RuntimeError, "past the guard"):
++                    self.lp.prepare({"root": "/M", "packages": ["/M/BP_Desk"], "max_live_instances": limit})
++
++
+ if __name__ == "__main__":
+     unittest.main()

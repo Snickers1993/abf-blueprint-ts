@@ -1,0 +1,23 @@
+diff --git a/editor/bpkit/apply.py b/editor/bpkit/apply.py
+index 22b465d..ef0131b 100644
+--- a/editor/bpkit/apply.py
++++ b/editor/bpkit/apply.py
+@@ -9,6 +9,7 @@ from .t3d import SpecError
+ 
+ BP_CLASSES = ("Blueprint", "WidgetBlueprint")
+ FINAL_MARK = "ABFMCP_APPLY_FINAL"   # headless.final_compile_errors reads the log after the last one of an asset
++_OBJECT_TEXT = re.compile(r"^(/Script/[^']+)'(/[^']+)'$")   # Class'/Path/X.X', an object pin default
+ 
+ 
+ class Env:
+@@ -110,6 +111,10 @@ def _preload(env, node):
+     for v in (node.get("objects") or {}).values():
+         if isinstance(v, str) and v.startswith("/") and not v.startswith("/Script/") and "'" not in v:
+             env.class_text(v)
++        m = isinstance(v, str) and _OBJECT_TEXT.match(v)
++        if m and not m.group(2).startswith("/Script/") and not m.group(1).endswith("Class"):
++            # an asset as a pin default (Class'/Mod/Dir/X.X'): the text import finds only loaded objects, else the pin is None
++            must(unreal.load_asset(m.group(2)), "asset " + m.group(2) + " (pin default)")
+     if node.get("k") == "std_macro":
+         sm = must(unreal.load_asset(t3d.STD_MACROS_PACKAGE), "StandardMacros")
+         must(LIB.find_graph(sm, node["name"]), "standard macro " + node["name"])

@@ -65,6 +65,19 @@ const NATIVE_MAKE: Readonly<Record<string, { fn: string; pins: readonly string[]
   "/Script/CoreUObject.Rotator": { fn: "MakeRotator", pins: ["Roll", "Pitch", "Yaw"] },
 };
 /**
+ * Native break function of the core math structs, with its input pin; its outputs are named after the struct's fields.
+ * The editor turns a Break Struct node on these structs into this call when it compiles or saves the Blueprint (under a
+ * new node name), so emitting the call directly keeps the saved graph identical to the one abfc applied (no false drift).
+ * Transform is left out: BreakTransform's outputs (Location, Rotation as a Rotator, Scale) are not the struct's fields.
+ */
+const NATIVE_BREAK: Readonly<Record<string, { fn: string; input: string; pins: readonly string[] }>> = {
+  "/Script/CoreUObject.Vector": { fn: "BreakVector", input: "InVec", pins: ["X", "Y", "Z"] },
+  "/Script/CoreUObject.Vector2D": { fn: "BreakVector2D", input: "InVec", pins: ["X", "Y"] },
+  "/Script/CoreUObject.Vector4": { fn: "BreakVector4", input: "InVec", pins: ["X", "Y", "Z", "W"] },
+  "/Script/CoreUObject.Rotator": { fn: "BreakRotator", input: "InRot", pins: ["Roll", "Pitch", "Yaw"] },
+  "/Script/CoreUObject.LinearColor": { fn: "BreakColor", input: "InColor", pins: ["R", "G", "B", "A"] },
+};
+/**
  * Pin default text of a core math struct literal whose fields are all number literals, in the struct's text order:
  * a Vector pin reads "X,Y,Z" and a Rotator pin "Pitch,Yaw,Roll" (as the editor writes them). Such a literal fed straight
  * into a pin needs no make node; a missing field is 0.
@@ -435,7 +448,12 @@ export class UnitBuilder {
       case "field": {
         const src = this.value(e.obj);
         let id = this.brkMemo.get(src.pin);
-        if (id === undefined) {
+        const native = NATIVE_BREAK[e.struct];
+        if (id === undefined && native !== undefined && native.pins.includes(e.name)) {
+          id = this.pureCall(MATH_LIBRARY, native.fn, e.span);
+          this.brkMemo.set(src.pin, id);
+          this.link(src.pin, `${id}.${native.input}`);
+        } else if (id === undefined) {
           id = this.emit("brk", this.profile.nodeClasses.breakStruct,
             ["bMadeAfterOverridePinRemoval=True", `StructType="${pinObjectText("struct", e.struct, this.classMeta)}"`], undefined, e.span);
           this.brkMemo.set(src.pin, id);

@@ -1,0 +1,271 @@
+diff --git a/editor/bpkit/apply.py b/editor/bpkit/apply.py
+index c60831b..5bee060 100644
+--- a/editor/bpkit/apply.py
++++ b/editor/bpkit/apply.py
+@@ -41,6 +41,11 @@ class Env:
+         return self.timeline_guids[name]
+ 
+ 
++def _iface_path(c):
++    """Generated class path of an interface reference (plain path or Class'/Path')."""
++    return c.split("'")[-2] if "'" in c else c
++
++
+ def _resolve(spec, mod):
+     path = spec["asset"]
+     name = path.rsplit("/", 1)[-1]
+@@ -178,7 +183,10 @@ def apply_asset(spec, mod, index=0):
+         LIB.compile_blueprint(bp)
+ 
+     # 5. functions: signatures first (entry and result only)
+-    removed = list(spec.get("remove_functions") or [])
++    # interface function graphs (abfc): one listed in remove_functions that already exists is reset in step 8, not removed
++    iface_paths = [_iface_path(it["class"]) for it in spec.get("interfaces") or []]
++    iface_fn_names = {f["name"] for it in spec.get("interfaces") or [] for f in it.get("functions") or []}
++    removed = [n for n in spec.get("remove_functions") or [] if not (n in iface_fn_names and assets.find_any_graph(bp, n) is not None)]
+     for name in removed:
+         must(LIB.find_graph(bp, name), "function graph " + name)
+         LIB.remove_function_graph(bp, name)
+@@ -226,7 +234,7 @@ def apply_asset(spec, mod, index=0):
+                 # the real class lacks this event until the edit below: template it against the scratch class's own event
+                 body = ['FunctionReference=(MemberName="%s",bSelfContext=True)' % n["function"]]
+                 self_keys.add(key)
+-            if k == "override" and not n["class"].startswith("/Script/"):
++            if k == "override" and not n["class"].startswith("/Script/") and _iface_path(n["class"]) not in iface_paths:
+                 bp_overrides.setdefault(n["class"], {})[key] = (cls, body)
+             else:
+                 items[key] = (cls, body)
+@@ -250,6 +258,8 @@ def apply_asset(spec, mod, index=0):
+             svars.append(v)
+         setups = [(lambda z, n=n, p=p: assets.add_dispatcher(z, n, p)) for n, p in disp.items()]
+         setups += [(lambda z, t=t, g=g: assets.add_timeline(z, t, g)) for t, g in tl_specs.values()]
++        # the scratch implements the spec's interfaces, so an interface event or message gets its pins
++        setups += [(lambda z, ip=ip: assets.add_interface(z, ip, "", [])) for ip in iface_paths]
+         if items:
+             raw.update(graphs.make_templates(items, svars, setups, list(self_events.items())))
+         cls_text = core.gen_class_text(bp)
+@@ -278,18 +288,29 @@ def apply_asset(spec, mod, index=0):
+             run_edit("macro:" + m["name"], must(LIB.find_graph(bp, m["name"]), "macro graph " + m["name"]),
+                      {"add": m.get("nodes") or [], "wires": m.get("wires") or []})
+ 
+-    # 8. interfaces
++    # 8. interfaces (abfc: added also without function graphs, never twice; an implemented one gets its listed graphs reset)
++    report["interfaces"] = []
+     for i, it in enumerate(spec.get("interfaces") or []):
+         icls = env.class_text(it["class"])
+-        parent = icls
++        ipath = _iface_path(it["class"])
+         defs_text, names = "", []
++        already = assets.implements_interface(bp, ipath)
+         for f in it.get("functions") or []:
+-            defs = [n.defn() for n in _fn_nodes(f, parent=parent, editable=False)]
++            defs = [n.defn() for n in _fn_nodes(f, parent=icls, editable=False)]
++            if already:
++                g = assets.find_any_graph(bp, f["name"])
++                if g is None:
++                    raise RuntimeError("%s implements %s but has no graph %s; open it in the Mod Editor (it adds the graph) or remove the interface" % (path, ipath, f["name"]))
++                graphs.write_graph(g, defs)
++                continue
+             defs_text += t3d.graph_obj(f["name"], defs)
+             names.append(f["name"])
+-        if names:
+-            assets.add_interface(bp, it["class"].split("'")[-2] if "'" in it["class"] else it["class"], defs_text, names)
+-            LIB.compile_blueprint(bp)
++        if not already:
++            assets.add_interface(bp, ipath, defs_text, names)
++        LIB.compile_blueprint(bp)
++        if not assets.implements_interface(bp, ipath):
++            raise RuntimeError("%s does not implement %s after the interface was added" % (path, ipath))
++        report["interfaces"].append({"class": ipath, "added": not already})
+ 
+     # 9. function bodies, then graphs
+     for f in spec.get("functions") or []:
+@@ -299,7 +320,7 @@ def apply_asset(spec, mod, index=0):
+     for i, it in enumerate(spec.get("interfaces") or []):
+         for f in it.get("functions") or []:
+             if f.get("nodes") or f.get("wires"):
+-                run_edit("if:%d:%s" % (i, f["name"]), must(LIB.find_graph(bp, f["name"]), "interface function graph " + f["name"]),
++                run_edit("if:%d:%s" % (i, f["name"]), must(assets.find_any_graph(bp, f["name"]), "interface function graph " + f["name"]),
+                          {"add": f.get("nodes") or [], "wires": f.get("wires") or []})
+     for i, g in enumerate(spec.get("graphs") or []):
+         run_edit("graph:%d" % i, graphs.find_graph(bp, g["graph"]), g)
+diff --git a/editor/bpkit/assets.py b/editor/bpkit/assets.py
+index 80fb6eb..ce7ab9e 100644
+--- a/editor/bpkit/assets.py
++++ b/editor/bpkit/assets.py
+@@ -95,14 +95,56 @@ def _component_object(ss, h, bp):
+     return must(unreal.SubobjectDataBlueprintFunctionLibrary.get_object_for_blueprint(must(d, "subobject data"), bp), "component object")
+ 
+ 
++# ---- field-default values (abfc): JSON {"k": kind, ...} -> Unreal values; no program text is evaluated -----------------
++
++_PY_SPLIT = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
++
++
++def set_prop(o, n, v):
++    """Set by the Unreal property name, then by the Python name Unreal derives from it (bHidden -> hidden, RelativeLocation -> relative_location)."""
++    try:
++        o.set_editor_property(n, v)
++    except Exception:  # noqa: BLE001
++        p = n[1:] if re.match(r"^b[A-Z]", n) else n
++        o.set_editor_property(_PY_SPLIT.sub("_", p).lower(), v)
++
++
++def field_value(v):
++    k = v["k"]
++    if k == "none":
++        return None
++    if k in ("bool", "num", "str"):
++        return v["v"]
++    if k == "name":
++        return unreal.Name(v["v"])
++    if k == "text":
++        return unreal.Text(v["v"])
++    if k == "asset":
++        return must(unreal.load_asset(v["path"]), "asset " + v["path"])
++    if k == "class":
++        return must(unreal.load_class(None, v["path"]), "class " + v["path"])
++    if k == "struct":
++        s = must(getattr(unreal, v["name"], None), "struct type unreal." + v["name"])()
++        for f, x in v["fields"].items():
++            set_prop(s, f, field_value(x))
++        return s
++    if k == "array":
++        return [field_value(x) for x in v["items"]]
++    raise RuntimeError("field value kind %s" % k)
++
++
+ def add_components(bp, items):
+-    """items: {"name","class","parent","properties","expressions","remove"}. No class on an existing name modifies it."""
++    """items: {"name","class","parent","properties","values","expressions","remove","ensure"}. No class on an existing name modifies it;
++    `ensure` (abfc) creates a missing component and modifies an existing one. `values` are field-default JSON values (field_value)."""
+     ss = _subsystem()
+     report = []
+     for it in items:
+         name = it["name"]
+         hs = _handles(ss, bp)
+         found = [h for h in hs[1:] if _handle_name(ss, h) == name]
++        if found and it.get("ensure"):
++            it = dict(it)
++            it.pop("class", None)
+         if it.get("remove"):
+             if not found:
+                 raise RuntimeError("cannot remove unknown component %s" % name)
+@@ -137,6 +179,8 @@ def add_components(bp, items):
+         obj = _component_object(ss, h, bp)
+         for k, v in (it.get("properties") or {}).items():
+             obj.set_editor_property(k, v)
++        for k, v in (it.get("values") or {}).items():
++            set_prop(obj, k, field_value(v))
+         for k, expr in (it.get("expressions") or {}).items():
+             obj.set_editor_property(k, eval(expr, {"unreal": unreal}, {}))
+         report.append({"name": name, "class": it.get("class")})
+@@ -182,6 +226,27 @@ def add_function_override(bp, name, defs):
+     return core.adopt_graphs(ib, [name], bp)
+ 
+ 
++def implements_interface(bp, iface_class):
++    """True when the compiled class implements the interface (its own entry or a parent's)."""
++    LIB.compile_blueprint(bp)
++    icls = must(unreal.load_class(None, iface_class), "interface " + iface_class)
++    cdo = unreal.get_default_object(must(LIB.generated_class(bp), "generated class of " + pth(bp)))
++    return bool(unreal.SystemLibrary.does_implement_interface(cdo, icls))
++
++
++def find_any_graph(bp, name):
++    """A graph of the Blueprint by name, interface graphs included."""
++    g = LIB.find_graph(bp, name)
++    if g is not None:
++        return g
++    pre = pth(bp) + "."
++    for x in unreal.ObjectIterator(unreal.EdGraph):
++        p = pth(x)
++        if p.startswith(pre) and "." not in p[len(pre):] and x.get_name() == name:
++            return x
++    return None
++
++
+ def add_interface(bp, iface_class, graphs_text, names):
+     """Append an ImplementedInterfaces entry (FBPInterfaceDescription: 8 + 16 bytes) keeping the existing ones."""
+     ie = "(Interface=\"/Script/Engine.BlueprintGeneratedClass'%s'\")" % iface_class
+diff --git a/editor/bpkit/graphs.py b/editor/bpkit/graphs.py
+index 9ed99a6..fd8abe5 100644
+--- a/editor/bpkit/graphs.py
++++ b/editor/bpkit/graphs.py
+@@ -118,7 +118,8 @@ def load_graph_model(bp, graph_name):
+ def find_graph(bp, name):
+     if name == "EventGraph":
+         return must(LIB.find_event_graph(bp), "EventGraph")
+-    return must(LIB.find_graph(bp, name), "graph " + name)
++    from . import assets
++    return must(assets.find_any_graph(bp, name), "graph " + name)
+ 
+ 
+ def _reserved(model):
+diff --git a/editor/bpkit/specs.py b/editor/bpkit/specs.py
+index 536db61..1d69da3 100644
+--- a/editor/bpkit/specs.py
++++ b/editor/bpkit/specs.py
+@@ -128,8 +128,41 @@ REQUIRED = {
+ CREATE_CLASSES = ("Blueprint", "WidgetBlueprint", "BlueprintInterface", "UserDefinedStruct")
+ RAW_KINDS = ("graph", "tree", "tree_replace", "python")
+ # bp_apply features reported by the backend_info tool
+-FEATURES = ("cast_object_pin", "class_manager_row", "class_manager_row_tag", "event_meta", "function_graphs", "map_types", "override_functions", "pin_types", "self_event_calls",
+-            "set_types", "struct_fields", "variable_defaults")
++FEATURES = ("cast_object_pin", "class_manager_row", "class_manager_row_tag", "components", "event_meta", "function_graphs", "interfaces", "map_types", "override_functions",
++            "pin_types", "self_event_calls", "set_types", "struct_fields", "variable_defaults")
++_VALUE_KINDS = ("none", "bool", "num", "str", "name", "text", "asset", "class", "struct", "array")
++_VALUE_PATH = re.compile(r"^/[A-Za-z0-9_]+(/[A-Za-z0-9_]+)+(\.[A-Za-z0-9_]+)?$")
++_VALUE_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
++
++
++def check_value(v, where, depth=0):
++    """Problems of an abfc field-default JSON value (assets.field_value)."""
++    if depth > 8 or not isinstance(v, dict) or v.get("k") not in _VALUE_KINDS:
++        return ["%s: not a value {k: %s}" % (where, "|".join(_VALUE_KINDS))]
++    k = v["k"]
++    if k == "bool" and not isinstance(v.get("v"), bool):
++        return [where + ": bool needs v true/false"]
++    if k == "num" and (isinstance(v.get("v"), bool) or not isinstance(v.get("v"), (int, float))):
++        return [where + ": num needs a number v"]
++    if k in ("str", "name", "text") and not isinstance(v.get("v"), str):
++        return [where + ": %s needs a string v" % k]
++    if k in ("asset", "class") and not (isinstance(v.get("path"), str) and _VALUE_PATH.match(v["path"])):
++        return [where + ": %s needs a plain object path" % k]
++    if k == "struct":
++        if not (isinstance(v.get("name"), str) and _VALUE_IDENT.match(v["name"]) and isinstance(v.get("fields"), dict)):
++            return [where + ": struct needs name and fields"]
++        out = []
++        for f, x in v["fields"].items():
++            out += ([] if _VALUE_IDENT.match(f) else ["%s: bad struct field %r" % (where, f)]) + check_value(x, "%s.%s" % (where, f), depth + 1)
++        return out
++    if k == "array":
++        if not isinstance(v.get("items"), list):
++            return [where + ": array needs items"]
++        out = []
++        for i, x in enumerate(v["items"]):
++            out += check_value(x, "%s[%d]" % (where, i), depth + 1)
++        return out
++    return []
+ EVENT_META_KEYS = ("tooltip", "category", "keywords")
+ EVENT_META_MAX = 2000
+ # keys that make no sense on a UserDefinedStruct asset
+@@ -462,6 +495,18 @@ def validate(batch, mod):
+         for i, c in enumerate(a.get("components") or []):
+             if not isinstance(c, dict) or not c.get("name"):
+                 problems.append("%s.components[%d] needs a name" % (w, i))
++                continue
++            if c.get("ensure") and not c.get("class"):
++                problems.append("%s.components[%d]: ensure needs the component class" % (w, i))
++            vals = c.get("values")
++            if vals is not None:
++                if not isinstance(vals, dict):
++                    problems.append("%s.components[%d].values must be an object {property: value}" % (w, i))
++                else:
++                    for k, v in vals.items():
++                        if not _VALUE_IDENT.match(k):
++                            problems.append("%s.components[%d].values: bad property name %r" % (w, i, k))
++                        problems.extend(check_value(v, "%s.components[%d].values.%s" % (w, i, k)))
+         for i, d in enumerate(a.get("dispatchers") or []):
+             if not isinstance(d, dict) or not d.get("name"):
+                 problems.append("%s.dispatchers[%d] needs a name" % (w, i))

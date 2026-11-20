@@ -1,0 +1,88 @@
+diff --git a/editor/bpkit/warm.py b/editor/bpkit/warm.py
+index d731251..b9c81f4 100644
+--- a/editor/bpkit/warm.py
++++ b/editor/bpkit/warm.py
+@@ -170,14 +170,34 @@ def reload_mod(mod, stage_dir):
+     return report
+ 
+ 
+-def remember_synced(mod, stage_dir):
++# Jobs that only read: after them every loaded, unmodified package still matches its file.
++READ_ONLY_OPS = ("export", "reflect", "catalog")
++# Asset classes no job changes in memory (prefixes of the class name): they keep their match after any job.
++_PLAIN_DATA = ("Sound", "Texture", "StaticMesh", "SkeletalMesh", "Material", "Niagara", "Anim", "PhysicsAsset", "Skeleton",
++               "Font", "Curve", "MediaSource", "FileMediaSource")
++
++
++def _plain_data(name):
++    try:
++        obj = unreal.find_object(None, "%s.%s" % (name, name.rsplit("/", 1)[-1]))
++        cls = obj.get_class().get_name() if obj is not None else ""
++    except Exception:
++        return False
++    return any(cls.startswith(p) for p in _PLAIN_DATA)
++
++
++def remember_synced(mod, stage_dir, op="export"):
+     """After a job that finished: every loaded package of the mod that is not modified in memory matches its file now (it was
+-    loaded or reloaded from it, or the job saved it). Their stats let the next job skip their reload."""
++    loaded or reloaded from it, or the job saved it). Their stats let the next job skip their reload. After a job that
++    changes Blueprints (apply, compile, asset_ops), a Blueprint, level or data table can differ from its file without being
++    marked modified (the compile reconstructs nodes in memory): only plain data (sounds, meshes, textures, materials) keeps
++    its match, everything else is reloaded by the next job, as it always was."""
+     if not stage_dir:
+         return
+     dirty = _dirty_names()
++    read_only = op in READ_ONLY_OPS
+     for name in _mod_packages(mod):
+-        if name in dirty or unreal.find_package(name) is None:
++        if name in dirty or unreal.find_package(name) is None or (not read_only and not _plain_data(name)):
+             _SYNCED.pop(name, None)
+             continue
+         f = _package_file(stage_dir, mod, name)
+@@ -211,7 +231,7 @@ def run_entry(entry, stage_dir):
+         core.configure("/%s/_McpTmp" % job["mod"], run)
+         result = jobs.COMMANDLET_OPS[op](job)
+         try:
+-            remember_synced(job["mod"], stage_dir)       # before warm.done: the host may change files once it sees that
++            remember_synced(job["mod"], stage_dir, op)   # before warm.done: the host may change files once it sees that
+         except Exception:
+             _SYNCED.clear()
+         jobs.write_result(run, True, result, None)
+diff --git a/tests/test_unit.py b/tests/test_unit.py
+index 2f93726..357176b 100644
+--- a/tests/test_unit.py
++++ b/tests/test_unit.py
+@@ -3019,6 +3019,15 @@ class WarmReloadTests(unittest.TestCase):
+             unload_packages=lambda pkgs: True)
+         fake.ReloadPackagesInteractionMode = types.SimpleNamespace(ASSUME_POSITIVE=1)
+         fake.log = fake.log_error = lambda *a: None
++        self.classes = {}
++
++        class Obj:
++            def __init__(self, cls):
++                self.cls = cls
++
++            def get_class(self):
++                return types.SimpleNamespace(get_name=lambda: self.cls)
++        fake.find_object = lambda outer, path: Obj(test.classes.get(path.split(".")[0], "Blueprint"))
+         self.Pkg = Pkg
+         stub = types.ModuleType("stub")
+         self.patch = mock.patch.dict(sys.modules, {"unreal": fake, "bpkit.core": stub, "bpkit.jobs": stub})
+@@ -3081,6 +3090,16 @@ class WarmReloadTests(unittest.TestCase):
+         self.job()
+         self.assertEqual(len(self.reloads), 1)
+ 
++    def test_after_a_job_that_changes_blueprints_only_plain_data_keeps_its_match(self):
++        self.classes = {"/M/A": "SoundWave", "/M/B": "Blueprint", "/M/C": "StaticMesh"}
++        self.warm.reload_mod("M", str(self.stage))
++        self.warm.remember_synced("M", str(self.stage), "compile")
++        self.warm.reload_mod("M", str(self.stage))
++        self.assertEqual(self.reloads[-1], ["/M/B"])        # the compiled Blueprint comes back from its file
++        self.warm.remember_synced("M", str(self.stage), "export")
++        self.warm.reload_mod("M", str(self.stage))
++        self.assertEqual(len(self.reloads), 2, "after a read nothing is reloaded")
++
+     def test_a_failed_reload_forgets_every_match(self):
+         self.job()
+         self.warm._SYNCED.clear()

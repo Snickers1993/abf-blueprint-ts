@@ -12,6 +12,7 @@ export const ALLOWED_TOOLS = [
   "warm_session",
   "staging_sync",
   "staging_status",
+  "staging_refresh",
   "bp_apply",
   "bp_asset_ops",
   "bp_read",

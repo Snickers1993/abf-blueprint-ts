@@ -3,6 +3,7 @@
 // without opening the backend, whether stubs have to be generated first.
 import { win32 } from "node:path";
 import { sourceStubImports } from "@abfc/compiler";
+import { sameEditorBuild } from "@abfc/env";
 import { sha256 } from "@abfc/ir";
 import type { StubImport } from "@abfc/compiler";
 import { catalogLookup, readCatalog, readCoverage, readLock } from "@abfc/stubgen";
@@ -176,7 +177,7 @@ export function usedPlaceholdersToGenerate(ctx: CliContext, used: readonly strin
   const open = candidates.filter((p) => !reflected.has(p));
   if (open.length === 0) return [];
   const catalog = readCatalog(profileDir);
-  if (catalog === null || (env.fingerprint !== null && catalog.catalog.editorFingerprint !== env.fingerprint)) return [];
+  if (catalog === null || !sameEditorBuild(env, catalog.catalog.editorFingerprint)) return [];
   const lookup = catalogLookup(catalog.catalog);
   return sortedUnique(
     open.filter((p) => {
@@ -195,12 +196,12 @@ export function stubsNeedWork(ctx: CliContext): string | null {
   const profileDir = win32.join(paths.stubsDir, env.profile.id);
   const lock = readLock(profileDir);
   if (lock === null) return "no stubs yet";
-  if (env.fingerprint !== null && lock.editorFingerprint !== env.fingerprint) return "the Mod Editor build changed";
+  if (!sameEditorBuild(env, lock.editorFingerprint)) return "the Mod Editor build changed";
   // A backend without the catalog tool was found for these stubs: nothing can be generated automatically, so the build stays as it was.
   if (lock.auto?.noCatalog !== undefined && lock.auto.noCatalog === backendIdOf(env)) return null;
   if (lock.auto === undefined) return "the stubs do not cover every game class yet";
   const catalog = readCatalog(profileDir);
-  if (catalog === null || (env.fingerprint !== null && catalog.catalog.editorFingerprint !== env.fingerprint)) return "no class catalog for this editor build";
+  if (catalog === null || !sameEditorBuild(env, catalog.catalog.editorFingerprint)) return "no class catalog for this editor build";
   const coverage = readCoverage(profileDir);
   if (coverage === null) return "the stub coverage file is missing";
   const req = resolveStubRequest({

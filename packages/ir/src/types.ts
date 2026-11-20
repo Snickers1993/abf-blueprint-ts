@@ -141,6 +141,11 @@ export interface BackendCapabilities {
   nodeKinds: string[];
   /** `mod_audit` can audit the stage (false in Phase 1: it audits the real mod). */
   stageAudit: boolean;
+  /**
+   * Tool `staging_refresh` (local backend patch backend-staging-refresh.patch): copies into the stage only the files the real mod
+   * changed and keeps the staged edits, instead of `staging_sync` with `discard_changes` copying the whole mod again.
+   */
+  stageRefresh: boolean;
   /** Raw container report of the backend, kept for `abfc doctor` only (null when the backend has no `backend_info`). */
   backendContainerTypes: { array: boolean; set: boolean; map: boolean } | null;
 }
