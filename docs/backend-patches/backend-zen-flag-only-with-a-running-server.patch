@@ -1,0 +1,121 @@
+diff --git a/headless.py b/headless.py
+index e6e37b3..d069d6e 100644
+--- a/headless.py
++++ b/headless.py
+@@ -52,6 +52,37 @@ def new_run(op):
+     return run
+ 
+ 
++ZEN_PORT_DEFAULT = 8558
++
++
++def zen_running():
++    """True when a zenserver already answers on the local Zen port (ABF_ZEN_PORT, default 8558): a TCP connect, no request."""
++    import socket
++    try:
++        port = int(os.environ.get("ABF_ZEN_PORT") or ZEN_PORT_DEFAULT)
++    except ValueError:
++        port = ZEN_PORT_DEFAULT
++    try:
++        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
++            return True
++    except OSError:
++        return False
++
++
++def zen_args():
++    """["-NoZenAutoLaunch"] when a zenserver is already running, else []. With a server running, a hidden run must use it and
++    never start its own: its redirected LOCALAPPDATA once made it install and start a second zenserver on the default port, the
++    user's shared Zen store was recreated and mod meshes stopped drawing in Play. With none running, the flag would leave the run
++    without derived data (bp_read failed with ABFC4002), so the editor's own auto-launch is kept. ABF_ZEN_AUTOLAUNCH=never
++    always passes the flag, =always never does."""
++    mode = (os.environ.get("ABF_ZEN_AUTOLAUNCH") or "").strip().lower()
++    if mode == "never":
++        return ["-NoZenAutoLaunch"]
++    if mode == "always":
++        return []
++    return ["-NoZenAutoLaunch"] if zen_running() else []
++
++
+ def _pid_alive(pid):
+     if pid <= 0:
+         return False
+@@ -369,10 +400,10 @@ def _launch(stage, job, kind, map_path, timeout, prepare=None):
+         userdir = _fwd(root() / "ud")
+         log = str(run / "editor.log")
+         if kind == "cmd":
+-            args = [exe, "-run=pythonscript", "-script=" + str(run / "abf_job.py"), "-unattended", "-NoZenAutoLaunch", "-nosplash", "-nullrhi",
++            args = [exe, "-run=pythonscript", "-script=" + str(run / "abf_job.py"), "-unattended", *zen_args(), "-nosplash", "-nullrhi",
+                     "-nopause", "-plugin=" + uplugin, "-userdir=" + userdir, "-abslog=" + log]
+         else:
+-            args = [exe, map_path, "-game", "-nullrhi", "-unattended", "-NoZenAutoLaunch", "-nosplash", "-nosound", "-nopause", "-plugin=" + uplugin,
++            args = [exe, map_path, "-game", "-nullrhi", "-unattended", *zen_args(), "-nosplash", "-nosound", "-nopause", "-plugin=" + uplugin,
+                     "-userdir=" + userdir, "-ExecCmds=py " + _fwd(run / "abf_job.py"), "-abslog=" + log]
+         t0 = time.time()
+         job_obj = KillOnCloseJob()
+@@ -507,7 +538,7 @@ class WarmSession:
+         env["ABF_MCP_WARM_DIR"] = _fwd(d)
+         env["ABF_MCP_STAGE_DIR"] = _fwd(self.stage.dir)
+         env.setdefault("ABF_WARM_IDLE_SECONDS", str(int(WARM_IDLE_DEFAULT)))
+-        args = [exe, "-run=pythonscript", "-script=" + str(d / "warm_loop.py"), "-unattended", "-NoZenAutoLaunch", "-nosplash", "-nullrhi", "-nopause",
++        args = [exe, "-run=pythonscript", "-script=" + str(d / "warm_loop.py"), "-unattended", *zen_args(), "-nosplash", "-nullrhi", "-nopause",
+                 "-plugin=" + _fwd(self.stage.uplugin_path), "-userdir=" + _fwd(root() / "ud"), "-abslog=" + str(d / "editor.log")]
+         t0 = time.time()
+         self.dir = d
+diff --git a/hiddendesk.py b/hiddendesk.py
+index 0f374db..a275d58 100644
+--- a/hiddendesk.py
++++ b/hiddendesk.py
+@@ -282,8 +282,8 @@ def _run_editor_once(stage, job, timeout=420):
+         write_recent_mod(headless.root() / "ud", abfmods[0])
+         env = redirect_home(headless.child_env(run, job_path))
+         env_block = "".join("%s=%s\0" % (k, v) for k, v in env.items()) + "\0"
+-        cmd = '"%s" -userdir=%s -NoZenAutoLaunch -nosplash -nopause "-ExecCmds=py %s" -abslog=%s' % (
+-            exe, userdir, str(run / "abf_job.py").replace("\\", "/"), log)
++        cmd = '"%s" -userdir=%s %s-nosplash -nopause "-ExecCmds=py %s" -abslog=%s' % (
++            exe, userdir, "".join(a + " " for a in headless.zen_args()), str(run / "abf_job.py").replace("\\", "/"), log)
+         desk_name = "ABFMCP_%d_%s" % (os.getpid(), secrets.token_hex(3))
+         job_obj = headless.KillOnCloseJob()
+         desk = user32.CreateDesktopW(desk_name, None, None, 0, 0x000F01FF, None)
+diff --git a/tests/test_zen_flag.py b/tests/test_zen_flag.py
+new file mode 100644
+index 0000000..4796780
+--- /dev/null
++++ b/tests/test_zen_flag.py
+@@ -0,0 +1,36 @@
++"""headless.zen_args: hidden runs pass -NoZenAutoLaunch only while a zenserver is already running."""
++import os
++import socket
++import sys
++import unittest
++from pathlib import Path
++from unittest import mock
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
++
++import headless  # noqa: E402
++
++
++class ZenFlagTests(unittest.TestCase):
++    def test_flag_only_while_a_server_answers(self):
++        srv = socket.socket()
++        srv.bind(("127.0.0.1", 0))
++        srv.listen(1)
++        port = srv.getsockname()[1]
++        try:
++            with mock.patch.dict(os.environ, {"ABF_ZEN_PORT": str(port), "ABF_ZEN_AUTOLAUNCH": ""}):
++                self.assertEqual(headless.zen_args(), ["-NoZenAutoLaunch"])
++        finally:
++            srv.close()
++        with mock.patch.dict(os.environ, {"ABF_ZEN_PORT": str(port), "ABF_ZEN_AUTOLAUNCH": ""}):
++            self.assertEqual(headless.zen_args(), [], "no server: the editor may start its own, else the run has no derived data")
++
++    def test_the_environment_can_force_either_way(self):
++        with mock.patch.object(headless, "zen_running", return_value=False), mock.patch.dict(os.environ, {"ABF_ZEN_AUTOLAUNCH": "never"}):
++            self.assertEqual(headless.zen_args(), ["-NoZenAutoLaunch"])
++        with mock.patch.object(headless, "zen_running", return_value=True), mock.patch.dict(os.environ, {"ABF_ZEN_AUTOLAUNCH": "always"}):
++            self.assertEqual(headless.zen_args(), [])
++
++
++if __name__ == "__main__":
++    unittest.main()
