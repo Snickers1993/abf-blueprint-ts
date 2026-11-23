@@ -514,6 +514,12 @@ export function publishRefusal(mod: string, r: PublishResult): Diagnostic[] {
         );
       }
       if (/unsaved changes/.test(why)) return d("ABFC7005", `save or revert those assets in the Mod Editor, ${again}`);
+      if (/reloaded earlier in this editor session/.test(why)) {
+        return d(
+          "ABFC7005",
+          `these classes were already reloaded live once in this Mod Editor session and their old copies are still in memory; a second live reload of them crashed the Mod Editor before. Restart the Mod Editor, or close it (the copy then needs no live reload; ABF_LIVE_PUBLISH_MAX_INSTANCES=0 on the backend switches this check off), ${again}`,
+        );
+      }
       if (/live instances/.test(why)) {
         return d(
           "ABFC7005",

@@ -1,0 +1,39 @@
+diff --git a/headless.py b/headless.py
+index 74162c8..e6e37b3 100644
+--- a/headless.py
++++ b/headless.py
+@@ -369,10 +369,10 @@ def _launch(stage, job, kind, map_path, timeout, prepare=None):
+         userdir = _fwd(root() / "ud")
+         log = str(run / "editor.log")
+         if kind == "cmd":
+-            args = [exe, "-run=pythonscript", "-script=" + str(run / "abf_job.py"), "-unattended", "-nosplash", "-nullrhi",
++            args = [exe, "-run=pythonscript", "-script=" + str(run / "abf_job.py"), "-unattended", "-NoZenAutoLaunch", "-nosplash", "-nullrhi",
+                     "-nopause", "-plugin=" + uplugin, "-userdir=" + userdir, "-abslog=" + log]
+         else:
+-            args = [exe, map_path, "-game", "-nullrhi", "-unattended", "-nosplash", "-nosound", "-nopause", "-plugin=" + uplugin,
++            args = [exe, map_path, "-game", "-nullrhi", "-unattended", "-NoZenAutoLaunch", "-nosplash", "-nosound", "-nopause", "-plugin=" + uplugin,
+                     "-userdir=" + userdir, "-ExecCmds=py " + _fwd(run / "abf_job.py"), "-abslog=" + log]
+         t0 = time.time()
+         job_obj = KillOnCloseJob()
+@@ -507,7 +507,7 @@ class WarmSession:
+         env["ABF_MCP_WARM_DIR"] = _fwd(d)
+         env["ABF_MCP_STAGE_DIR"] = _fwd(self.stage.dir)
+         env.setdefault("ABF_WARM_IDLE_SECONDS", str(int(WARM_IDLE_DEFAULT)))
+-        args = [exe, "-run=pythonscript", "-script=" + str(d / "warm_loop.py"), "-unattended", "-nosplash", "-nullrhi", "-nopause",
++        args = [exe, "-run=pythonscript", "-script=" + str(d / "warm_loop.py"), "-unattended", "-NoZenAutoLaunch", "-nosplash", "-nullrhi", "-nopause",
+                 "-plugin=" + _fwd(self.stage.uplugin_path), "-userdir=" + _fwd(root() / "ud"), "-abslog=" + str(d / "editor.log")]
+         t0 = time.time()
+         self.dir = d
+diff --git a/hiddendesk.py b/hiddendesk.py
+index e3ce49a..0f374db 100644
+--- a/hiddendesk.py
++++ b/hiddendesk.py
+@@ -282,7 +282,7 @@ def _run_editor_once(stage, job, timeout=420):
+         write_recent_mod(headless.root() / "ud", abfmods[0])
+         env = redirect_home(headless.child_env(run, job_path))
+         env_block = "".join("%s=%s\0" % (k, v) for k, v in env.items()) + "\0"
+-        cmd = '"%s" -userdir=%s -nosplash -nopause "-ExecCmds=py %s" -abslog=%s' % (
++        cmd = '"%s" -userdir=%s -NoZenAutoLaunch -nosplash -nopause "-ExecCmds=py %s" -abslog=%s' % (
+             exe, userdir, str(run / "abf_job.py").replace("\\", "/"), log)
+         desk_name = "ABFMCP_%d_%s" % (os.getpid(), secrets.token_hex(3))
+         job_obj = headless.KillOnCloseJob()

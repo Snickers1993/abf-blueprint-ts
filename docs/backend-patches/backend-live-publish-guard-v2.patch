@@ -1,0 +1,306 @@
+diff --git a/editor/bpkit/livepublish.py b/editor/bpkit/livepublish.py
+index 145a92f..8f071d4 100644
+--- a/editor/bpkit/livepublish.py
++++ b/editor/bpkit/livepublish.py
+@@ -97,27 +97,119 @@ def _dependency_order(names):
+ 
+ # More live instances of the swapped classes than this in the open level: the class swap of a live publish is refused (one
+ # publish of 41 classes with about 1,140 preview actors in the level crashed the editor). `max_live_instances` overrides it;
+-# 0 means no limit.
++# 0 means no limit (and no check for old copies, below).
+ _MAX_LIVE_INSTANCES = 300
+ 
+ 
+-def _live_instances(pkgs):
+-    """Actors in the open level whose class lives in one of `pkgs`: (count, {package: count})."""
+-    names, by = set(pkgs), {}
++def _all_actors():
++    """Every actor of the open editor world. EditorActorSubsystem.get_all_level_actors leaves actors out (tool-spawned
++    preview actors were missing from it while the world's own actor list held thousands), so the world's actor list is
++    asked first; the level-actor list is the fallback."""
+     try:
+-        actors = unreal.get_editor_subsystem(unreal.EditorActorSubsystem).get_all_level_actors()
++        world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
++        if world is not None:
++            got = unreal.GameplayStatics.get_all_actors_of_class(world, unreal.Actor)
++            if got is not None:
++                return list(got)
+     except Exception:
+-        return 0, by
+-    for a in actors or []:
++        pass
++    try:
++        return list(unreal.get_editor_subsystem(unreal.EditorActorSubsystem).get_all_level_actors() or [])
++    except Exception:
++        return []
++
++
++def _short(n):
++    return n.rsplit("/", 1)[-1]
++
++
++def _live_instances(pkgs, also=()):
++    """Actors in the open editor world whose class is, or derives from, the Blueprint class of one of `pkgs` or `also` (the
++    loaded referencers the publish reloads too: their classes are swapped as well): (count, {package: count}). Packages that
++    are not loaded Blueprints count only their exact class."""
++    names = list(dict.fromkeys(list(pkgs) + list(also or [])))
++    wanted = set(names)
++    per_class, cls_of = {}, {}
++    for a in _all_actors():
+         try:
+-            p = str(a.get_class().get_path_name()).split(".")[0]
++            c = a.get_class()
++            p = str(c.get_path_name())
+         except Exception:
+             continue
+-        if p in names:
+-            by[p] = by.get(p, 0) + 1
++        per_class[p] = per_class.get(p, 0) + 1
++        cls_of.setdefault(p, c)
++    guarded = None
++    by = {}
++    for p, k in per_class.items():
++        owner = p.split(".")[0]
++        if owner not in wanted:
++            owner = None
++            if not p.startswith("/Script/"):            # a native class never derives from a Blueprint class
++                if guarded is None:
++                    guarded = []
++                    for n in names:
++                        try:
++                            g = unreal.find_object(None, "%s.%s_C" % (n, _short(n)))
++                        except Exception:
++                            g = None
++                        if g is not None:
++                            guarded.append((n, g))
++                for n, g in guarded:
++                    try:
++                        if unreal.MathLibrary.class_is_child_of(cls_of[p], g):
++                            owner = n
++                            break
++                    except Exception:
++                        continue
++        if owner is not None:
++            by[owner] = by.get(owner, 0) + k
++    guarded = None
++    cls_of = None
+     return sum(by.values()), by
+ 
+ 
++def _old_copies(names):
++    """Packages of `names` whose old version from an earlier reload in this editor session is still in memory after a garbage
++    collection: a package renamed to `<name>_DEADPACKAGE...`, or a class `TRASHCLASS_<Name>_C...` / `REINST_<Name>_C...`.
++    Something (a Python global, a bound delegate, an actor of a preview) still holds it, and reloading the same package again
++    while it does is the one difference known between a live publish that worked and the next one, of the same classes in
++    the same session, that crashed the editor (20 Nov). {package: [old object names]}."""
++    by_short = {}
++    for n in names:
++        by_short.setdefault(_short(n), n)
++    found = {}
++    prefixes = []
++    for sh, n in by_short.items():
++        prefixes += [("TRASHCLASS_%s_C" % sh, n), ("REINST_%s_C" % sh, n)]
++    try:
++        for c in unreal.ObjectIterator(unreal.Class):
++            try:
++                cn = c.get_name()
++            except Exception:
++                continue
++            if not cn.startswith(("TRASHCLASS_", "REINST_")):
++                continue
++            for pre, n in prefixes:
++                if cn.startswith(pre):
++                    found.setdefault(n, []).append(cn)
++                    break
++    except Exception:
++        pass
++    dead = tuple("%s_DEADPACKAGE" % n for n in names)
++    try:
++        for pk in unreal.ObjectIterator(unreal.Package):
++            try:
++                pn = pk.get_name()
++            except Exception:
++                continue
++            if "_DEADPACKAGE" in pn and pn.startswith(dead):
++                n = next(x for x in names if pn.startswith("%s_DEADPACKAGE" % x))
++                found.setdefault(n, []).append(pn)
++    except Exception:
++        pass
++    return {n: sorted(v)[:5] for n, v in found.items()}
++
++
+ def prepare(args):
+     """Make the given /Mod/... packages safe to overwrite on disk. Refuses (and changes nothing) when Play In Editor is
+     running or when any of them, or any loaded package of the same mod that references them (`referencers`), has unsaved
+@@ -133,12 +225,25 @@ def prepare(args):
+     limit = args.get("max_live_instances")
+     limit = _MAX_LIVE_INSTANCES if limit is None else int(limit)
+     if limit > 0:
+-        n, by = _live_instances(pkgs)
++        n, by = _live_instances(pkgs, refs)
+         if n > limit:
+             top = ", ".join("%s x%d" % (p.rsplit("/", 1)[-1], c) for p, c in sorted(by.items(), key=lambda kv: -kv[1])[:5])
+-            return {"refused": sorted(by), "live_instances": n,
++            also = sorted(p for p in by if p in refs)
++            return {"refused": sorted(by), "live_instances": n, "live_instances_by_package": by, "instance_referencers": also,
+                     "reason": "%d live instances of the published classes are in the open level (%s), more than %d; swapping "
+-                              "their classes live can crash the editor" % (n, top, limit)}
++                              "their classes live can crash the editor%s" % (
++                                  n, top, limit, " (counting the referencers reloaded with them: %s)" % ", ".join(
++                                      p.rsplit("/", 1)[-1] for p in also) if also else "")}
++        try:
++            unreal.SystemLibrary.collect_garbage()      # what nothing holds any more is gone before the old copies are looked for
++        except Exception:
++            pass
++        old = _old_copies(list(pkgs) + list(refs))
++        if old:
++            listed = "; ".join("%s: %s" % (p.rsplit("/", 1)[-1], ", ".join(v)) for p, v in sorted(old.items())[:5])
++            return {"refused": sorted(old), "old_copies": old,
++                    "reason": "these classes were reloaded earlier in this editor session and their old copies are still held in "
++                              "memory (%s); reloading them again live can crash the editor" % listed}
+     dirty = {p.get_name() for p in unreal.EditorLoadingAndSavingUtils.get_dirty_content_packages()}
+     hit = [p for p in pkgs if p in dirty]
+     hit_refs = [p for p in refs if p in dirty]
+diff --git a/staging.py b/staging.py
+index 52cbdb2..3ade422 100644
+--- a/staging.py
++++ b/staging.py
+@@ -377,6 +377,19 @@ def _restore(src, backup, rels, existed, manifest):
+     return failed
+ 
+ 
++def _step(backup, step, **data):
++    """Append one live publish step to `publish-steps.jsonl` in the backup folder, written by the server before and after each
++    call into the open editor, so an editor that stops answering (or crashes) leaves a record of the step it was in. Never raises."""
++    if backup is None:
++        return
++    try:
++        line = json.dumps(dict(step=step, at=time.strftime("%Y-%m-%dT%H:%M:%S"), **data), default=str)
++        with open(Path(backup) / "publish-steps.jsonl", "a", encoding="utf-8") as f:
++            f.write(line + "\n")
++    except Exception:
++        pass
++
++
+ def _try_reload(editor, packages, also=None):
+     try:
+         return editor.reload(packages, also)
+@@ -471,6 +484,9 @@ def publish(stage, editor, compile_gate, assets=None, dry_run=False, now=None, d
+                 tail = "Stop Play In Editor, then publish again."
+             elif "unsaved" in reason:
+                 tail = "Save or revert those assets, then publish again."
++            elif "reloaded earlier in this editor session" in reason:
++                tail = ("Restart the Mod Editor, or close it and publish again (the copy then needs no live reload); "
++                        "ABF_LIVE_PUBLISH_MAX_INSTANCES=0 switches this check off.")
+             elif "live instances" in reason:
+                 tail = ("Remove most of those actors from the open level (for example close the runtime preview), or close the "
+                         "editor and publish again (the copy then needs no live reload); ABF_LIVE_PUBLISH_MAX_INSTANCES changes the limit.")
+@@ -525,6 +541,8 @@ def publish(stage, editor, compile_gate, assets=None, dry_run=False, now=None, d
+         (backup / "manifest.json").write_text(json.dumps({"mod": name, "created": stamp, "real_mod": str(src), "files": man,
+                                                           "added": [r for r in files if r not in existing],
+                                                           "deleted": del_existing}, indent=2), encoding="utf-8")
++        if state == "open":
++            _step(backup, "prepared", packages=prep_pkgs, result=prep)
+     except Exception as e:
+         return abort("backup failed", "Refused: could not back up the real files (%s). Nothing was copied." % e)
+     manifest = {m["path"]: m["sha256"] for m in man}
+@@ -573,8 +591,11 @@ def publish(stage, editor, compile_gate, assets=None, dry_run=False, now=None, d
+                 tag_res = {"error": str(e), "unregistered": wanted}
+             if not isinstance(tag_res, dict):
+                 tag_res = {"error": "unexpected tag registration reply", "unregistered": wanted}
++        _step(backup, "copied", files=files, deleted=del_existing)
++        _step(backup, "reload start", packages=packages, also=prep.get("referencers"))
+         try:
+             rel_res = editor.reload(packages, prep.get("referencers"))
++            _step(backup, "reload done", result=rel_res)
+             bad_reload = rel_res.get("missing") or rel_res.get("error")
+             if not bad_reload and del_pkgs:
+                 forgot = editor.forget(del_pkgs)
+@@ -583,6 +604,7 @@ def publish(stage, editor, compile_gate, assets=None, dry_run=False, now=None, d
+                     bad_reload = "forget: %s" % forgot["error"]
+         except Exception as e:
+             bad_reload = str(e)
++            _step(backup, "reload failed", error=bad_reload)
+         if bad_reload:
+             try:
+                 editor.prepare(prep_pkgs, live_limit=False)    # the reload re-opened the files; release them so the restore can write
+diff --git a/tests/test_unit.py b/tests/test_unit.py
+index 5be9ce2..d30a00f 100644
+--- a/tests/test_unit.py
++++ b/tests/test_unit.py
+@@ -1212,6 +1212,27 @@ class StagingTests(unittest.TestCase):
+         self.assertEqual(ed.seen["at_prepare"], b"A-original" * 50)
+         self.assertEqual(ed.seen["at_reload"], b"edited")
+         self.assertEqual(r["route"], "live-reload")
++        steps = [json.loads(l) for l in (Path(r["backup"]) / "publish-steps.jsonl").read_text(encoding="utf-8").splitlines()]
++        self.assertEqual([s["step"] for s in steps], ["prepared", "copied", "reload start", "reload done"])
++
++    def test_an_editor_that_stops_answering_in_the_reload_leaves_the_step_on_disk(self):
++        self.stage_write("Content/A.uasset", b"edited")
++        ed = FakeEditor("open", real=self.real)
++        real_reload = ed.reload
++        hung = []
++
++        def reload(packages, also=None):
++            if not hung:
++                hung.append(1)
++                raise TimeoutError("no answer in 180 s")
++            return real_reload(packages, also)
++
++        ed.reload = reload
++        r = staging.publish(self.stage, ed, self.gate_ok)
++        self.assertEqual(r["refused"], "reload failed")
++        steps = [json.loads(l) for l in (Path(r["backup"]) / "publish-steps.jsonl").read_text(encoding="utf-8").splitlines()]
++        self.assertEqual([s["step"] for s in steps], ["prepared", "copied", "reload start", "reload failed"])
++        self.assertIn("no answer", steps[-1]["error"])
+ 
+     def write_real_tag_ini(self, tags=("ClassManager.EntityDirector.One", "ClassManager.EntityDirector.Two")):
+         ini = self.real / "Config" / "Tags" / "FakeTags.ini"
+@@ -3174,6 +3195,47 @@ class LivePublishInstanceGuardTests(unittest.TestCase):
+                 with self.assertRaisesRegex(RuntimeError, "past the guard"):
+                     self.lp.prepare({"root": "/M", "packages": ["/M/BP_Desk"], "max_live_instances": limit})
+ 
++    def test_the_world_actor_list_is_counted_when_the_level_list_misses_preview_actors(self):
++        world = object()
++        seen = [self.Actor("/M/BP_Desk.BP_Desk_C")] * 320
++        self.lp.unreal.get_editor_subsystem("ued").get_editor_world = lambda: world
++        self.lp.unreal.Actor = "Actor"
++        self.lp.unreal.GameplayStatics = types.SimpleNamespace(
++            get_all_actors_of_class=lambda w, c: list(seen) if (w, c) == (world, "Actor") else [])
++        self.actors = []                                                  # the level-actor list sees none of them
++        r = self.lp.prepare({"root": "/M", "packages": ["/M/BP_Desk"]})
++        self.assertEqual(r["live_instances"], 320)
++
++    def test_instances_of_child_classes_and_of_reloaded_referencers_count(self):
++        desk = object()
++        kid_class = types.SimpleNamespace(get_path_name=lambda: "/M/Kids/BP_DeskKid.BP_DeskKid_C")
++        kid = types.SimpleNamespace(get_class=lambda: kid_class)
++        self.lp.unreal.find_object = lambda outer, path: desk if path == "/M/BP_Desk.BP_Desk_C" else None
++        self.lp.unreal.MathLibrary = types.SimpleNamespace(class_is_child_of=lambda c, p: c is kid_class and p is desk)
++        self.actors = ([kid] * 200 + [self.Actor("/M/Rooms/BP_Section.BP_Section_C")] * 150
++                       + [self.Actor("/Script/Engine.StaticMeshActor")] * 5000)
++        n, by = self.lp._live_instances(["/M/BP_Desk"], ["/M/Rooms/BP_Section"])
++        self.assertEqual((n, by), (350, {"/M/BP_Desk": 200, "/M/Rooms/BP_Section": 150}))
++
++    def test_old_copies_of_an_earlier_reload_refuse_the_next_one(self):
++        def named(n):
++            return types.SimpleNamespace(get_name=lambda: n)
++        self.lp.unreal.Class, self.lp.unreal.Package = "Class", "Package"
++        objs = {"Class": [named("BP_Lamp_C"), named("TRASHCLASS_BP_Desk_C_3"), named("REINST_BP_Other_C_1")],
++                "Package": [named("/M/BP_Lamp_DEADPACKAGE_0"), named("/Game/X")]}
++        self.lp.unreal.ObjectIterator = lambda cls: iter(objs[cls])
++        gc = mock.Mock()
++        self.lp.unreal.SystemLibrary = types.SimpleNamespace(collect_garbage=gc)
++        r = self.lp.prepare({"root": "/M", "packages": ["/M/BP_Desk", "/M/BP_Lamp"]})
++        gc.assert_called()
++        self.assertEqual(r["refused"], ["/M/BP_Desk", "/M/BP_Lamp"])
++        self.assertEqual(r["old_copies"], {"/M/BP_Desk": ["TRASHCLASS_BP_Desk_C_3"], "/M/BP_Lamp": ["/M/BP_Lamp_DEADPACKAGE_0"]})
++        self.assertIn("reloaded earlier in this editor session", r["reason"])
++        past = types.SimpleNamespace(get_dirty_content_packages=mock.Mock(side_effect=RuntimeError("past the guard")))
++        with mock.patch.object(self.lp.unreal, "EditorLoadingAndSavingUtils", past):
++            with self.assertRaisesRegex(RuntimeError, "past the guard"):  # the restore path (limit 0) checks neither
++                self.lp.prepare({"root": "/M", "packages": ["/M/BP_Desk"], "max_live_instances": 0})
++
+ 
+ if __name__ == "__main__":
+     unittest.main()
